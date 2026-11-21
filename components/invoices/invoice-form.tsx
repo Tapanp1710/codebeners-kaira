@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * Invoice creation form, rendered by `app/(app)/invoices/new/page.tsx`.
+ *
+ * React Hook Form + Zod handle client-side validation; `useCreateInvoice` sends
+ * POST /api/v1/invoices and, on success, invalidates every ledger-derived query
+ * (`invalidateFinancial`). All money and quantities stay decimal strings end to end: the
+ * running total shown here is an exact BigInt estimate for display only, and the backend
+ * computes the authoritative invoice total from the submitted items.
+ */
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus, Trash2 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -16,9 +25,17 @@ import { useCreateInvoice, useCustomers } from "@/lib/api/hooks";
 import { addDays, todayIn } from "@/lib/format/dates";
 import { estimateLine, isDecimalString, sumMoney } from "@/lib/format/money";
 
+// Inputs are validated as strings (never parsed to floats): unit price is a positive-format decimal with
+// at most 12 integer digits and 2 decimal places; quantity allows 3 decimal places and must be > 0.
+// `Number(v) > 0` is only a sign/zero check on an already format-validated string.
 const money = z.string().trim().regex(/^\d{1,12}(\.\d{1,2})?$/, "Up to 2 decimal places");
 const qty = z.string().trim().regex(/^\d{1,9}(\.\d{1,3})?$/, "Up to 3 decimal places").refine((v) => Number(v) > 0, "Must be more than 0");
 
+/**
+ * Client-side schema mirroring the InvoiceCreate contract. Dates are `YYYY-MM-DD` strings from
+ * `<input type="date">`, so the due-date check is a plain string comparison (lexicographic order
+ * equals chronological order for that format). The backend re-validates everything.
+ */
 export const invoiceSchema = z
   .object({
     customer_id: z.string().min(1, "Choose a customer"),
@@ -32,14 +49,21 @@ export const invoiceSchema = z
   .refine((v) => v.due_date >= v.invoice_date, { path: ["due_date"], message: "Due date cannot be before the invoice date" });
 type Values = z.infer<typeof invoiceSchema>;
 
+/**
+ * New-invoice form. Optional `?customer=<id>` preselects the customer (used when starting an
+ * invoice from a customer page). On success it toasts and navigates to the new invoice.
+ */
 export function InvoiceForm() {
   const router = useRouter();
   const params = useSearchParams();
   const { session } = useSession();
   const toast = useToast();
+  // "Today" is computed in the business timezone from the session (not the browser's local zone).
   const today = todayIn(session?.business.timezone);
+  // The customer picker loads a single page of up to 200 customers; there is no search or paging here.
   const customers = useCustomers({ page_size: 200 });
   const create = useCreateInvoice();
+  // Defaults: invoice dated today, due in 15 days, one empty line with quantity 1.
   const form = useForm<Values>({
     resolver: zodResolver(invoiceSchema),
     defaultValues: {
@@ -58,14 +82,20 @@ export function InvoiceForm() {
       form.resetField("customer_id", { defaultValue: preselected });
     }
   }, [preselected, loadedCustomers, form]);
+  // `fields` carries stable ids for React keys; `items` (useWatch) re-renders on every keystroke so the
+  // per-line and total estimates stay live.
   const { fields, append, remove } = useFieldArray({ control: form.control, name: "items" });
   const items = useWatch({ control: form.control, name: "items" });
+  // Lines whose quantity or price is not yet a valid decimal estimate to null and are skipped by sumMoney,
+  // so half-typed input never throws or produces NaN.
   const lines = (items ?? []).map((i) => (i && isDecimalString(i.quantity ?? "") && isDecimalString(i.unit_price ?? "") ? estimateLine(i.quantity, i.unit_price) : null));
   const estimate = sumMoney(lines);
   const errors = form.formState.errors;
 
+  /** Runs only after Zod validation passes. Text is trimmed and empty notes are sent as null. */
   async function onSubmit(v: Values) {
     try {
+      // No Idempotency-Key on invoice creation (only payments use one), and mutations are not auto-retried.
       const invoice = await create.mutateAsync({
         customer_id: v.customer_id,
         invoice_date: v.invoice_date,
@@ -73,9 +103,15 @@ export function InvoiceForm() {
         notes: v.notes?.trim() || null,
         items: v.items.map((i) => ({ description: i.description.trim(), quantity: i.quantity, unit_price: i.unit_price })),
       });
+      // invoice_number and the total are assigned by the backend; the UI only echoes them.
       toast(`Invoice ${invoice.invoice_number} created for ${invoice.customer_name}`);
       router.push(`/invoices/${invoice.id}`);
     } catch (err) {
+      // Backend VALIDATION_ERROR details are keyed by the last `loc` segment (ApiError.fieldErrors).
+      // Only top-level fields are mapped onto inputs; item-level keys (e.g. "description") are not,
+      // as the last segment alone does not say which line they belong to. The error also stays on
+      // `create.error`; note the FormError below suppresses any VALIDATION_ERROR that has field errors,
+      // so a server rejection naming only item fields is not shown anywhere on the form.
       if (err instanceof ApiError) {
         for (const [field, message] of Object.entries(err.fieldErrors())) {
           if (["customer_id", "invoice_date", "due_date", "notes"].includes(field)) form.setError(field as keyof Values, { message });
@@ -84,6 +120,12 @@ export function InvoiceForm() {
     }
   }
 
+  // Layout: items card on the left, sticky estimate/submit card on the right (xl screens).
+  // `noValidate` turns off native browser bubbles so Zod messages are the single source of errors;
+  // Field wires each message to its input via aria-describedby. The remove button is disabled when only
+  // one line remains, matching the schema's "at least one item" rule.
+  // The summary FormError hides a VALIDATION_ERROR that produced field errors (to avoid a duplicate
+  // message) and shows every other failure (network, timeout, business-rule rejections).
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="grid gap-6 xl:grid-cols-[2fr_1fr]">
       <Card className="space-y-5">

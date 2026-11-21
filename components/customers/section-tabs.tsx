@@ -5,9 +5,15 @@ import { usePathname } from "next/navigation";
 
 import { cn } from "@/components/ui/primitives";
 
-/** Secondary navigation inside "Customers & Invoices". */
+/**
+ * Secondary navigation inside "Customers & Invoices".
+ * Rendered at the top of app/(app)/customers/page.tsx and app/(app)/invoices/page.tsx; pure client-side
+ * links, no data fetching.
+ */
 export function SectionTabs() {
   const pathname = usePathname();
+  // In the map below, a tab is active on its own route and on nested routes (e.g. /customers/{id}); the trailing "/" check
+  // avoids matching unrelated paths that merely share the prefix.
   const tabs = [
     { href: "/customers", label: "Customers" },
     { href: "/invoices", label: "Invoices" },

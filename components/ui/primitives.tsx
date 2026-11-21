@@ -1,6 +1,13 @@
+/**
+ * Core design-system primitives (buttons, cards, headers, badges, stats, loading/empty/error states,
+ * notices). Stateless and hook-free with no "use client" directive, so they render in server and client
+ * components alike. Colours are Tailwind v4 theme tokens defined in app/globals.css (steel, navy, cream,
+ * good/warn/danger, and `sim` for simulated what-if values).
+ */
 import Link from "next/link";
 import type { ComponentProps, ReactNode } from "react";
 
+/** Minimal className joiner: drops falsy parts. Does not merge conflicting Tailwind classes. */
 export function cn(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ");
 }
@@ -21,6 +28,11 @@ type ButtonProps = ComponentProps<"button"> & {
   loading?: boolean;
 };
 
+/**
+ * Button with variants and sizes. `loading` disables the button and sets aria-busy, which is what
+ * prevents double submission of forms while a mutation is in flight. Native `type` is passed through
+ * unchanged (default "submit" inside forms), so non-submit buttons must set type="button".
+ */
 export function Button({ variant = "primary", size = "md", loading, className, children, disabled, ...rest }: ButtonProps) {
   return (
     <button
@@ -40,6 +52,7 @@ export function Button({ variant = "primary", size = "md", loading, className, c
   );
 }
 
+/** Next.js Link styled as a button (client-side navigation, real <a> semantics). Defaults to the secondary variant. */
 export function LinkButton({ href, variant = "secondary", className, children }: { href: string; variant?: keyof typeof VARIANTS; className?: string; children: ReactNode }) {
   return (
     <Link
@@ -52,6 +65,7 @@ export function LinkButton({ href, variant = "secondary", className, children }:
 }
 
 // ------------------------------------------------------------------ Card
+/** Surface container rendered as a <section>; `min-w-0` lets it shrink inside grid/flex layouts so wide tables scroll instead of overflowing. */
 export function Card({ className, children, ...rest }: ComponentProps<"section">) {
   return (
     <section {...rest} className={cn("min-w-0 rounded-[var(--radius-card)] bg-paper p-5 shadow-[var(--shadow-card)] ring-1 ring-line/70", className)}>
@@ -60,6 +74,7 @@ export function Card({ className, children, ...rest }: ComponentProps<"section">
   );
 }
 
+/** Card title row (h2) with optional subtitle and right-aligned action; `id` allows aria-labelledby references. */
 export function CardHeader({ title, subtitle, action, id }: { title: ReactNode; subtitle?: ReactNode; action?: ReactNode; id?: string }) {
   return (
     <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -72,6 +87,7 @@ export function CardHeader({ title, subtitle, action, id }: { title: ReactNode; 
   );
 }
 
+/** Page-level title (the page's single h1) with optional subtitle and action buttons. */
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: ReactNode; actions?: ReactNode }) {
   return (
     <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -85,6 +101,7 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
 }
 
 // ------------------------------------------------------------------ Badge
+// Badge tones. `sim` is reserved for simulated (what-if) figures so they never look like actual or projected values.
 const TONES = {
   neutral: "bg-navy/5 text-ink ring-navy/10",
   good: "bg-good-soft text-good ring-good/20",
@@ -104,6 +121,10 @@ export function Badge({ tone = "neutral", children, className }: { tone?: Tone; 
 }
 
 // ------------------------------------------------------------------ Stat
+/**
+ * KPI tile. `value` is usually a pre-formatted node (e.g. <Money>), not a raw number. With `href` the
+ * whole tile becomes a link (same card styling); otherwise it renders inside a plain Card.
+ */
 export function Stat({ label, value, hint, tone, href }: { label: string; value: ReactNode; hint?: ReactNode; tone?: "good" | "danger" | "warn"; href?: string }) {
   const body = (
     <>
@@ -124,6 +145,7 @@ export function Stat({ label, value, hint, tone, href }: { label: string; value:
 }
 
 // ------------------------------------------------------------------ states
+/** Decorative spinner (aria-hidden); the accessible busy signal comes from the surrounding element. */
 export function Spinner({ className }: { className?: string }) {
   return (
     <svg className={cn("animate-spin", className)} viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -137,6 +159,7 @@ export function Skeleton({ className }: { className?: string }) {
   return <div aria-hidden="true" className={cn("animate-pulse rounded-lg bg-navy/[0.06]", className)} />;
 }
 
+/** Skeleton rows plus a screen-reader-only label in a polite status region, used while queries load. */
 export function LoadingBlock({ label = "Loading…", rows = 3 }: { label?: string; rows?: number }) {
   return (
     <div role="status" aria-live="polite" className="space-y-3">
@@ -148,6 +171,7 @@ export function LoadingBlock({ label = "Loading…", rows = 3 }: { label?: strin
   );
 }
 
+/** Dashed placeholder for lists with no rows, with an optional call-to-action. */
 export function EmptyState({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
   return (
     <div className="rounded-xl border border-dashed border-line px-6 py-10 text-center">
@@ -158,6 +182,11 @@ export function EmptyState({ title, children, action }: { title: string; childre
   );
 }
 
+/**
+ * Inline query-failure block (role="alert"). Shows the error's message (ApiError messages come from the
+ * backend envelope or the client's network/timeout text) and an optional retry, typically a query's refetch.
+ * BACKEND_UNAVAILABLE is the proxy's 502 code when the backend cannot be reached.
+ */
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : "Something went wrong.";
   const code = (error as { code?: string })?.code;
@@ -174,6 +203,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   );
 }
 
+/** Toned message box. Only the "danger" tone uses role="alert" (interrupts screen readers); others are role="note". */
 export function Notice({ tone = "info", title, children }: { tone?: "info" | "warn" | "danger" | "good" | "sim"; title?: string; children: ReactNode }) {
   const styles = {
     info: "bg-steel/10 text-steel-strong ring-steel/20",

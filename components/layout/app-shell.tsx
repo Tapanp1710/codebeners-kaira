@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * Authenticated application chrome, rendered by `app/(app)/layout.tsx` inside `<Providers>`.
+ *
+ * Provides the desktop sidebar and mobile navigation drawer, the sticky header (pending-approval
+ * badge, alerts menu, user menu with sign-out), the floating "Ask KAIRA" orb that opens the voice
+ * assistant sheet, and a skip link to `#main`. It reads the session from context and queries
+ * GET /actions (pending count) and GET /insights (alerts); both refresh through the normal
+ * React Query staleness rules and `invalidateFinancial` / action invalidations elsewhere.
+ */
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
@@ -25,6 +34,11 @@ import { VoiceOrb } from "@/components/voice/voice-orb";
 import { logout } from "@/lib/api/client";
 import { useActions, useInsights } from "@/lib/api/hooks";
 
+/**
+ * Primary navigation entries. `also` lists extra path prefixes that highlight the same entry
+ * (invoice pages live under "Customers & Invoices"). Approvals and Settings are linked separately.
+ * Exported for tests.
+ */
 export const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/customers", label: "Customers & Invoices", icon: Users, also: ["/invoices"] },
@@ -33,11 +47,13 @@ export const NAV = [
   { href: "/scenarios", label: "What-If Analysis", icon: FlaskConical },
 ] as const;
 
+/** Exact match or a sub-path ("/customers/123"), but not a sibling sharing a prefix ("/customersX"). */
 function isActive(pathname: string, item: (typeof NAV)[number]) {
   const prefixes = [item.href, ...("also" in item ? item.also : [])];
   return prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
+/** Shared by the sidebar and the mobile drawer; `onNavigate` lets the drawer close itself. Marks the active link with aria-current="page". */
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   return (
@@ -66,14 +82,23 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
+/**
+ * Right-hand modal sheet hosting the AssistantPanel, built on the native <dialog> (focus trap and
+ * inert background come from showModal). The panel is only rendered while open, so closing the
+ * sheet unmounts it: its recorder releases the microphone and any playing answer is paused by the
+ * panel's own cleanup, and the next opening starts from a blank state.
+ */
 function AssistantSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  // Syncs the `open` prop to the imperative dialog API. Unlike ui/Dialog there is no attribute fallback
+  // when showModal is unavailable (the optional call just does nothing).
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     if (open && !el.open) el.showModal?.();
     if (!open && el.open) el.close?.();
   }, [open]);
+  // Esc fires `cancel`; it is prevented so React state (not the browser) decides when the dialog closes.
   return (
     <dialog
       ref={ref}
@@ -104,9 +129,15 @@ function AssistantSheet({ open, onClose }: { open: boolean; onClose: () => void 
   );
 }
 
+/**
+ * Bell button with a dropdown of backend insights (GET /insights). The badge counts only
+ * non-"info" insights, while the list shows all of them. The dropdown is a simple toggle: it does not
+ * close on outside click or Esc, only on the bell or on following a link.
+ */
 function Notifications() {
   const insights = useInsights();
   const [open, setOpen] = useState(false);
+  // Insights have no id in this payload, so list items are keyed by index below.
   const urgent = (insights.data ?? []).filter((i) => i.severity !== "info");
   return (
     <div className="relative">
@@ -149,7 +180,11 @@ function Notifications() {
   );
 }
 
-/** Where an insight leads. Uses only ids present in the backend's `related` payload. */
+/**
+ * Where an insight leads. Uses only ids present in the backend's `related` payload.
+ * A related customer wins over the insight type; unknown types fall back to the dashboard.
+ * Also used by the dashboard's alert list (components/dashboard/dashboard-view.tsx).
+ */
 export function insightHref(i: { type: string; related: Record<string, unknown> }): string {
   const customer = i.related?.customer_id;
   if (typeof customer === "string") return `/customers/${customer}`;
@@ -159,12 +194,22 @@ export function insightHref(i: { type: string; related: Record<string, unknown> 
   return "/dashboard";
 }
 
+/**
+ * Avatar menu: user name/role/email, an owner-only "Business settings" link (hidden for staff; the
+ * backend still enforces the role), and sign-out.
+ */
 function UserMenu() {
   const { session, isOwner } = useSession();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Placed after all hooks so hook order stays stable when the session is cleared.
   if (!session) return null;
+  /**
+   * POST /auth/logout (the backend revokes the refresh token and clears its HttpOnly cookies), then wipe client state regardless
+   * of the outcome: `logout()` publishes a null session in its own finally, and this finally clears
+   * the query cache and hard-navigates to /login even if the request failed.
+   */
   async function onLogout() {
     setBusy(true);
     try {
@@ -204,13 +249,20 @@ function UserMenu() {
   );
 }
 
+/** Page frame for every route under app/(app). `children` is the routed page, rendered inside <main id="main">. */
 export function AppShell({ children }: { children: ReactNode }) {
   const { session } = useSession();
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  // Fetches a single row only to read `total`: the number of proposals awaiting approval.
+  // Its key starts with "actions", so extract/approve/reject invalidations refresh this badge too.
   const pending = useActions({ status: "pending", page_size: 1 });
   const pendingCount = pending.data?.total ?? 0;
 
+  // The mobile drawer is rendered only while open (role="dialog", aria-modal) and closes on backdrop
+  // click or navigation; it is not a native <dialog>, so it has no built-in focus trap or Esc handling.
+  // The launcher orb is the small, idle-only VoiceOrb used as a plain button: it opens the
+  // assistant sheet and never records by itself.
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[17rem_1fr]">
       <a href="#main" className="sr-only z-50 rounded bg-paper px-3 py-2 focus:not-sr-only focus:fixed focus:top-2 focus:left-2">

@@ -1,9 +1,21 @@
 "use client";
 
+/**
+ * Home dashboard (rendered by app/(app)/dashboard/page.tsx).
+ *
+ * Read-only summary built from two queries:
+ *   - GET /dashboard                               (useDashboard): cash, receivables, bills, payments,
+ *     forecast summary, alerts, recent audit activity and the pending-proposal count, all as of `as_of`
+ *   - GET /cashflow/forecast?horizon_days=90&granularity=weekly (useForecast): points for the mini chart
+ * Every figure is computed by the backend from the ledger; this component only formats and links. Both
+ * queries are refreshed by invalidateFinancial() after any financial write elsewhere in the app, and the
+ * two load independently, so a forecast failure does not hide the rest of the dashboard.
+ */
 import { AlertTriangle, ArrowRight, Info, RefreshCw, ShieldAlert } from "lucide-react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 
+// Maps an alert (InsightOut) to the page that resolves it: the related customer, cash flow, bills or receivables.
 import { insightHref } from "@/components/layout/app-shell";
 import { useSession } from "@/components/providers";
 import { Money, PAYMENT_METHOD_LABEL } from "@/components/ui/finance";
@@ -11,19 +23,36 @@ import { Badge, Card, CardHeader, EmptyState, ErrorState, LoadingBlock, Notice, 
 import { useDashboard, useForecast } from "@/lib/api/hooks";
 import { formatDate, formatDateTime, humanize, relativeTime } from "@/lib/format/dates";
 
+// Recharts is client-only and heavy: load the chart lazily with no SSR and show a skeleton meanwhile.
 const ForecastChart = dynamic(() => import("@/components/charts/forecast-chart").then((m) => m.ForecastChart), {
   ssr: false,
   loading: () => <Skeleton className="h-56 w-full" />,
 });
 
+// Alert severity (InsightOut.severity) -> icon; colour is chosen alongside in the alerts list.
 const SEVERITY_ICON = { critical: ShieldAlert, warning: AlertTriangle, info: Info } as const;
 
+/** Greeting, headline stats, cash outlook, alerts, upcoming bills, recent payments and recent activity. */
 export function DashboardView() {
+  // Session is only used for the first name in the greeting.
   const { session } = useSession();
   const dashboard = useDashboard();
+  // Weekly points over 90 days keep the compact chart light. This query key differs from the cash flow
+  // page's daily forecast, so the two are cached separately.
   const forecast = useForecast(90, "weekly");
   const d = dashboard.data;
 
+  // Header: "updated N ago" uses React Query's dataUpdatedAt (client fetch time), while "Figures as of"
+  // is the backend's business date; the refresh button refetches only the dashboard query.
+  // Loading/error: error and loading states are rendered for the dashboard query; the main content only
+  // renders once data exists. The forecast chart has its own skeleton/error fallback.
+  // Money: all amounts are decimal strings rendered by <Money>; the only comparison done here is the
+  // string check total_overdue !== "0.00" to colour the Overdue stat.
+  // Shortfall: has_shortfall / first_shortfall_date / lowest_balance come from the backend forecast
+  // summary; the chart's dashed line is the business's shortfall_threshold from the forecast response.
+  // Proposals: a non-zero pending_action_count links to /actions; approval happens there, not here.
+  // Activity: dotted audit action types are humanised for display (String.replace swaps only the first
+  // "."); "via assistant" marks entries that came from an approved proposal (source_action_id).
   return (
     <>
       <PageHeader

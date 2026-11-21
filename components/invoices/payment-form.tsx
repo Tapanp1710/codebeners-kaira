@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * "Record payment" modal for a single invoice, opened from `app/(app)/invoices/[id]/page.tsx`.
+ *
+ * Sends POST /api/v1/invoices/{id}/payments via `useRecordPayment`, which attaches an
+ * `Idempotency-Key` header and invalidates all ledger-derived queries on success. Uses plain
+ * controlled state rather than React Hook Form because there is a single validated field (amount).
+ * Amounts are decimal strings compared with exact BigInt helpers; the backend remains the
+ * authority on overpayment and on the resulting balance/status.
+ */
 import { useState, type FormEvent } from "react";
 
 import { useSession, useToast } from "@/components/providers";
@@ -13,7 +22,11 @@ import type { Invoice, PaymentMethod, Schemas } from "@/lib/api/types";
 import { formatMoney, compareMoney, isValidAmount } from "@/lib/format/money";
 import { todayIn } from "@/lib/format/dates";
 
-/** Client-side pre-check only; the backend rejects overpayment authoritatively. */
+/**
+ * Client-side pre-check only; the backend rejects overpayment authoritatively.
+ * Returns an error message, or null when `amount` is a positive string with at most 2 decimals that
+ * does not exceed `outstanding` (both compared exactly, never as floats). Exported for unit tests.
+ */
 export function validatePaymentAmount(amount: string, outstanding: string): string | null {
   if (!amount.trim()) return "Enter an amount";
   if (!isValidAmount(amount)) return "Enter a positive amount with up to 2 decimal places";
@@ -21,21 +34,34 @@ export function validatePaymentAmount(amount: string, outstanding: string): stri
   return null;
 }
 
+/**
+ * Payment dialog. Stays mounted while the invoice page is open; `open` toggles visibility.
+ * After a successful write it switches to a confirmation view built from the server response
+ * (new outstanding balance and payment status), not from local arithmetic.
+ */
 export function PaymentDialog({ invoice, open, onClose }: { invoice: Invoice; open: boolean; onClose: () => void }) {
   const { session } = useSession();
   const toast = useToast();
   const record = useRecordPayment(invoice.id);
   const [amount, setAmount] = useState("");
+  // Defaults to today in the business timezone; not reset on close, so it persists between openings.
   const [date, setDate] = useState(() => todayIn(session?.business.timezone));
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [reference, setReference] = useState("");
   const [notes, setNotes] = useState("");
+  // Amount errors are shown only after blur, submit or "Pay full balance", not while the field is pristine.
   const [touched, setTouched] = useState(false);
   // One key per submission attempt; kept across retries so a retry can never double-record.
   const [idempotencyKey, setIdempotencyKey] = useState(newIdempotencyKey);
   const [confirmed, setConfirmed] = useState<Schemas["PaymentRecordedOut"] | null>(null);
+  // `invoice.outstanding` comes from the parent's invoice query, so after invalidation it reflects the
+  // refreshed balance for the next payment.
   const amountError = touched ? validatePaymentAmount(amount, invoice.outstanding) : null;
 
+  /**
+   * Clears the entry fields, confirmation and mutation error, then tells the parent to hide the dialog.
+   * Wired to Cancel, Done, the close button and Esc (via Dialog's onCancel/onClose).
+   */
   function close() {
     setConfirmed(null);
     setAmount("");
@@ -49,20 +75,30 @@ export function PaymentDialog({ invoice, open, onClose }: { invoice: Invoice; op
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setTouched(true);
+    // Invalid input never reaches the network; the inline error is already visible via `touched`.
     if (validatePaymentAmount(amount, invoice.outstanding)) return;
     try {
+      // Optional text fields are trimmed and sent as null when empty; amount stays a string.
       const result = await record.mutateAsync({
         idempotencyKey,
         body: { amount: amount.trim(), payment_date: date, payment_method: method, reference: reference.trim() || null, notes: notes.trim() || null },
       });
       setConfirmed(result);
+      // Success consumes the key; any further payment from this dialog is a new submission.
       setIdempotencyKey(newIdempotencyKey());
       toast(`Payment of ${formatMoney(result.payment.amount)} recorded`);
     } catch (err) {
       // Business-rule rejections are final for this key's content; let the next attempt use a new key.
       if (err instanceof ApiError && err.status >= 400 && err.status < 500) setIdempotencyKey(newIdempotencyKey());
+      // Network errors, timeouts (status 0) and 5xx keep the key: the server may have recorded the payment
+      // before the failure, and resubmitting with the same key lets it replay instead of duplicating.
+      // The message itself is shown from `record.error` by the FormError below.
     }
   }
+
+  // Two views: the confirmation (after success) or the entry form. In the confirmation,
+  // `confirmed.replayed` is set by the backend when the key matched an already-recorded payment.
+  // "Pay full balance" copies the outstanding string verbatim into the amount field.
 
   return (
     <Dialog open={open} onClose={close} title={`Record payment · ${invoice.invoice_number}`} description={<>Outstanding now <Money value={invoice.outstanding} className="font-semibold text-ink" /></>}>

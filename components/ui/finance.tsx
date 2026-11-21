@@ -1,10 +1,19 @@
+/**
+ * Finance-specific display primitives: exact money rendering, status badges, and label maps that
+ * translate backend enum codes into UI text, plus the shared table wrapper and cell classes.
+ * No hooks or "use client" directive, so these work in both server and client components.
+ */
 import type { ReactNode } from "react";
 
 import { formatMoney } from "@/lib/format/money";
 
 import { Badge, cn, type Tone } from "./primitives";
 
-/** Displays a backend money string exactly (no float conversion). */
+/**
+ * Displays a backend money string exactly (no float conversion).
+ * Values are rupee decimal strings (e.g. "150000.00"), not paise; output uses ₹ and Indian digit grouping,
+ * "—" for null/empty, and the raw text unchanged if it is not a decimal. `signed` adds "+" to positive values.
+ */
 export function Money({ value, className, signed }: { value: string | null | undefined; className?: string; signed?: boolean }) {
   return <span className={cn("num whitespace-nowrap", className)}>{formatMoney(value, { signed })}</span>;
 }
@@ -16,6 +25,10 @@ const PAYMENT_STATUS: Record<string, { tone: Tone; label: string }> = {
   void: { tone: "neutral", label: "Void" },
 };
 
+/**
+ * Invoice payment status badge, plus a separate "Overdue" badge when the backend flags it.
+ * Unknown status codes fall back to a neutral badge showing the raw code, so new backend values still render.
+ */
 export function PaymentStatusBadge({ status, overdue, daysOverdue }: { status: string; overdue?: boolean; daysOverdue?: number }) {
   const s = PAYMENT_STATUS[status] ?? { tone: "neutral" as Tone, label: status };
   return (
@@ -31,6 +44,7 @@ export function CommitmentBadge({ status }: { status: string }) {
   return <Badge tone={COMMITMENT[status] ?? "neutral"}>Promise · {status}</Badge>;
 }
 
+/** Receivables ageing bucket codes from the backend -> display labels. */
 export const AGEING_LABEL: Record<string, string> = {
   current: "Not yet due",
   "1_30": "1–30 days",
@@ -39,6 +53,7 @@ export const AGEING_LABEL: Record<string, string> = {
   "90_plus": "90+ days",
 };
 
+/** Payment method codes -> labels. Its key order also drives the method <select> in PaymentDialog. */
 export const PAYMENT_METHOD_LABEL: Record<string, string> = {
   cash: "Cash",
   upi: "UPI",
@@ -48,7 +63,11 @@ export const PAYMENT_METHOD_LABEL: Record<string, string> = {
   other: "Other",
 };
 
-/** Accessible scrollable table wrapper that stays usable on mobile. */
+/**
+ * Accessible scrollable table wrapper that stays usable on mobile.
+ * The table keeps a 640px minimum width and scrolls horizontally inside its card (the negative margin
+ * lets it reach the card edges); `caption` is screen-reader only.
+ */
 export function DataTable({ caption, children, className }: { caption: string; children: ReactNode; className?: string }) {
   return (
     <div className={cn("relative -mx-5 overflow-x-auto px-5", className)}>
@@ -60,7 +79,8 @@ export function DataTable({ caption, children, className }: { caption: string; c
   );
 }
 
-export const th = "border-b border-line px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted first:pl-0 last:pr-0";
+// Shared cell class strings for DataTable children; the *Num variants right-align numeric columns.
+export const th ="border-b border-line px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted first:pl-0 last:pr-0";
 export const td = "border-b border-line/60 px-3 py-3 align-top first:pl-0 last:pr-0";
 export const tdNum = cn(td, "text-right");
 export const thNum = cn(th, "text-right");

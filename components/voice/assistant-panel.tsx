@@ -1,5 +1,19 @@
 "use client";
 
+/**
+ * The KAIRA assistant: voice or typed request -> transcript -> structured result.
+ *
+ * Flow:
+ * 1. Tap the orb: `useRecorder` captures up to 30 s of audio (explicit, user-started only).
+ * 2. The clip goes to POST /voice/transcribe (multipart); the transcript lands in an editable textarea.
+ * 3. "Understand" sends the (possibly edited) text to POST /assistant/extract via `useExtract`.
+ * 4. The response is one of: a proposal (rendered by ProposalCard for owner approval - nothing is
+ *    written to the ledger here), an answer (optionally read aloud via POST /voice/speak),
+ *    a reminder draft, or an "unknown" message.
+ *
+ * Mounted only inside the app shell's assistant sheet, which unmounts it on close.
+ * GET /ready tells the panel whether the server has a voice provider (Sarvam) configured.
+ */
 import { MessageSquareText, Sparkles, Volume2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -15,6 +29,7 @@ import { RECORDER_MESSAGES, useRecorder } from "@/hooks/use-recorder";
 
 import { VoiceOrb, type OrbState } from "./voice-orb";
 
+// "unknown" means no language_code is sent to transcription, letting the provider detect it.
 const LANGUAGES: { value: TranscribeLanguage; label: string }[] = [
   { value: "unknown", label: "Auto-detect" },
   { value: "en-IN", label: "English" },
@@ -22,27 +37,42 @@ const LANGUAGES: { value: TranscribeLanguage; label: string }[] = [
   { value: "hi-IN", label: "हिन्दी Hindi" },
 ];
 
+/** One-tap sample requests covering the three main intents: record a payment/promise, ask a question, run a what-if. */
 export const EXAMPLES = [
   "Ramesh paid me 5,000 rupees today. He will clear the remaining amount next Monday.",
   "How much do my customers owe me?",
   "What happens if my biggest customer pays 15 days late?",
 ];
 
+/** Self-contained assistant UI; takes no props. All state is local and is discarded when the sheet closes. */
 export function AssistantPanel() {
+  // Readiness is fetched with plain fetch (public endpoint, 60 s stale, no retry). Until it loads,
+  // `voiceConfigured` is false, but the warning notices below wait for `isSuccess` so they never flash.
   const readiness = useReadiness();
   const voiceConfigured = readiness.data?.checks?.voice_provider === "configured";
   const extractionProvider = readiness.data?.checks?.extraction_provider;
   const [language, setLanguage] = useState<TranscribeLanguage>("unknown");
   const [transcript, setTranscript] = useState("");
+  // Sent to /assistant/extract as `input_mode`. Becomes "voice" after a transcription and "text" when an
+  // example is picked; manual edits of a transcribed text keep it at "voice".
   const [inputMode, setInputMode] = useState<"text" | "voice">("text");
+  // Language reported by the speech-to-text service (used when the selector is on Auto-detect).
   const [detected, setDetected] = useState<string | null>(null);
+  // Workflow part of the orb state (processing/ready/speaking/error); recorder status overrides it below.
   const [orb, setOrb] = useState<OrbState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ExtractResponse | null>(null);
+  // Kept separate from `error` so a failed read-aloud does not hide the answer it belongs to.
   const [speechError, setSpeechError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // useExtract invalidates the "actions" queries on success, so a new proposal also bumps the shell's approval badge.
   const extract = useExtract();
 
+  /**
+   * Recorder completion handler: uploads the clip for transcription and fills the textarea.
+   * It does not call extract automatically - the user always sees and can edit the transcript first.
+   * An empty transcript is treated as an error so the user is prompted to retry or type.
+   */
   const onAudio = useCallback(
     async (audio: Blob) => {
       setOrb("processing");
@@ -61,15 +91,21 @@ export function AssistantPanel() {
     },
     [language],
   );
+  // useRecorder keeps the latest onAudio in a ref, so changing the language mid-session is picked up.
+  // Microphone failures (unsupported browser, permission denied, no device, empty clip) surface as
+  // recorder.status === "error" with a RecorderError code rather than as thrown exceptions.
   const recorder = useRecorder(onAudio);
 
   // Recorder status drives the orb directly while capturing; otherwise the workflow state does.
   const orbState: OrbState =
     recorder.status === "recording" ? "listening" : recorder.status === "requesting" ? "processing" : recorder.status === "error" ? "error" : orb;
+  // Recorder errors take priority and are mapped to user-facing text (each suggests typing instead).
   const shownError = recorder.status === "error" && recorder.error ? RECORDER_MESSAGES[recorder.error] : error;
 
+  // On unmount (sheet closed), stop any answer that is still being read aloud.
   useEffect(() => () => audioRef.current?.pause(), []);
 
+  /** Orb toggle: stop if recording; otherwise clear the previous result/errors and start a fresh recording. */
   function onOrbPress() {
     if (recorder.status === "recording") recorder.stop();
     else {
@@ -81,12 +117,18 @@ export function AssistantPanel() {
     }
   }
 
+  /**
+   * Sends the current transcript to POST /assistant/extract. The backend decides the intent and
+   * returns a proposal, answer, reminder or unknown result; proposals are stored server-side as
+   * pending actions awaiting approval, not executed.
+   */
   async function onUnderstand() {
     if (!transcript.trim()) return;
     setError(null);
     setResult(null);
     setOrb("processing");
     try {
+      // An explicit language choice wins; on Auto-detect use the STT-detected code, or null (backend decides).
       const lang = language === "unknown" ? ((detected as LanguageCode | null) ?? undefined) : language;
       const res = await extract.mutateAsync({ transcript: transcript.trim(), language: lang ?? null, input_mode: inputMode });
       setResult(res);
@@ -97,6 +139,11 @@ export function AssistantPanel() {
     }
   }
 
+  /**
+   * Reads an answer aloud, only on an explicit button press. POST /voice/speak returns base64 audio
+   * (text is truncated to 2,500 characters in lib/api/voice.ts), which is decoded into a Blob object URL
+   * and played. Unsupported answer languages fall back to en-IN.
+   */
   async function onSpeak(text: string, lang: string) {
     setSpeechError(null);
     setOrb("speaking");
@@ -104,6 +151,7 @@ export function AssistantPanel() {
       const speech = await speak(text, (["te-IN", "hi-IN", "en-IN"].includes(lang) ? lang : "en-IN") as LanguageCode);
       const url = speechToObjectUrl(speech);
       const audio = new Audio(url);
+      // The ref is only used for the unmount pause; the object URL is revoked when playback ends.
       audioRef.current = audio;
       audio.onended = () => {
         URL.revokeObjectURL(url);
@@ -111,13 +159,19 @@ export function AssistantPanel() {
       };
       await audio.play();
     } catch (err) {
+      // Covers both the API call and audio.play() rejections (e.g. browser autoplay policy).
       setOrb("ready");
       setSpeechError(`Could not read the answer aloud: ${describeError(err)}`);
     }
   }
 
+  // While busy the orb is disabled, except during recording so the user can always tap to stop.
   const busy = extract.isPending || orbState === "processing";
 
+  // Rendering notes: a hidden span mirrors orbState for tests (data-testid="orb-state"). Without a
+  // voice provider, warnings explain that only typed English works (rules-based extraction when the
+  // server reports extraction_provider "rules"). Result blocks are chosen by `result.kind`; an answer may
+  // be shown in English when translation is unavailable (`language` differs from `answer_language`).
   return (
     <div className="space-y-5">
       <div className="flex flex-col items-center gap-2 rounded-2xl bg-navy px-4 py-6 text-cream">

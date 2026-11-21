@@ -1,5 +1,17 @@
 "use client";
 
+/**
+ * Bills & expenses panel on the Cash flow page (app/(app)/cashflow/page.tsx, anchored at #bills so the
+ * dashboard and alerts can deep-link to it).
+ *
+ * Bills are payables. An unpaid bill is a PROJECTED outflow that feeds the cash forecast; paying it
+ * records an ACTUAL outflow that reduces current cash. Endpoints (via lib/api/hooks.ts):
+ *   - GET  /bills?status=&page_size=100          useBills
+ *   - POST /bills                                useCreateBill
+ *   - POST /bills/{id}/payments + Idempotency-Key usePayBill
+ * Both writes call invalidateFinancial(), so the forecast, dashboard, insights and audit views refetch.
+ * Money is handled as decimal strings throughout; comparisons use exact BigInt helpers, never floats.
+ */
 import { Plus } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
@@ -14,9 +26,12 @@ import type { Bill, PaymentMethod } from "@/lib/api/types";
 import { addDays, formatDate, todayIn } from "@/lib/format/dates";
 import { compareMoney, formatMoney, isValidAmount } from "@/lib/format/money";
 
+/** Dialog that creates a bill (POST /bills). Stays mounted while closed, so its fields persist between openings. */
 function NewBillDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { session } = useSession();
   const toast = useToast();
+  // "Today" in the business's timezone (falls back to Asia/Kolkata), not the browser's, so a late-night
+  // entry does not land on the wrong calendar date.
   const today = todayIn(session?.business.timezone);
   const create = useCreateBill();
   const [vendor, setVendor] = useState("");
@@ -24,16 +39,21 @@ function NewBillDialog({ open, onClose }: { open: boolean; onClose: () => void }
   const [category, setCategory] = useState("general");
   const [amount, setAmount] = useState("");
   const [billDate, setBillDate] = useState(today);
+  // Default payment term of 15 days; addDays works in UTC on the calendar date, so no DST/timezone drift.
   const [dueDate, setDueDate] = useState(addDays(today, 15));
   const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    // Client-side checks for quick feedback only; the backend validates again. Dates are YYYY-MM-DD
+    // strings, so plain string comparison orders them correctly.
     if (!vendor.trim()) return setError("Enter the vendor name.");
     if (!isValidAmount(amount)) return setError("Enter a positive amount with up to 2 decimals.");
     if (dueDate < billDate) return setError("Due date cannot be before the bill date.");
     try {
+      // Empty description becomes null and an empty category falls back to "general"; amount is sent as
+      // the typed decimal string.
       await create.mutateAsync({ vendor_name: vendor.trim(), description: description.trim() || null, category: category.trim() || "general", amount, bill_date: billDate, due_date: dueDate });
       toast("Bill added");
       onClose();
@@ -62,13 +82,20 @@ function NewBillDialog({ open, onClose }: { open: boolean; onClose: () => void }
   );
 }
 
+/**
+ * Dialog that records a payment against one bill (POST /bills/{id}/payments). Mounted only while a bill
+ * is selected, so each opening starts with fresh state and a fresh idempotency key.
+ */
 function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
   const { session } = useSession();
   const toast = useToast();
   const pay = usePayBill(bill.id);
+  // Pre-filled with the full remaining balance (a decimal string from the API).
   const [amount, setAmount] = useState(bill.outstanding);
   const [date, setDate] = useState(todayIn(session?.business.timezone));
   const [method, setMethod] = useState<PaymentMethod>("bank_transfer");
+  // Idempotency-Key for this submission, created lazily on mount and reused when the same submission is
+  // retried, so the backend can de-duplicate a repeated request (see the catch block for when it rotates).
   const [key, setKey] = useState(newIdempotencyKey);
   const [error, setError] = useState<string | null>(null);
 
@@ -76,12 +103,18 @@ function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
     e.preventDefault();
     setError(null);
     if (!isValidAmount(amount)) return setError("Enter a positive amount with up to 2 decimals.");
+    // Overpayment guard using exact decimal comparison against the outstanding shown in the dialog.
     if (compareMoney(amount, bill.outstanding) > 0) return setError(`Cannot exceed the remaining ${formatMoney(bill.outstanding)}.`);
     try {
       const result = await pay.mutateAsync({ idempotencyKey: key, body: { amount, payment_date: date, payment_method: method } });
+      // The confirmation uses the server's recorded amount and new outstanding, not the typed value.
       toast(`Paid ${formatMoney(result.payment.amount)} to ${bill.vendor_name}. Remaining ${formatMoney(result.bill.outstanding)}.`);
       onClose();
     } catch (err) {
+      // A 4xx rejection (e.g. validation) means nothing was recorded, so the next attempt is treated as a
+      // new submission with a new key; 5xx keeps the key for a safe retry. Note: unwrap() reports network
+      // failures and timeouts as ApiError status 0, which also satisfies `< 500`, so those rotate the key
+      // too even though the server may have recorded the payment.
       if (err instanceof ApiError && err.status < 500) setKey(newIdempotencyKey());
       setError(describeError(err));
     }
@@ -112,11 +145,16 @@ function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
   );
 }
 
+/** Filterable bill list with "Add bill" and per-row "Pay" actions. */
 export function BillsPanel() {
+  // "" means "All": the status param is omitted. The filter is part of the query key, so each filter
+  // value is cached separately. Only the first 100 bills are shown (no pager).
   const [status, setStatus] = useState<"open" | "overdue" | "paid" | "">("open");
   const bills = useBills({ status: status || undefined, page_size: 100 });
   const [adding, setAdding] = useState(false);
   const [paying, setPaying] = useState<Bill | null>(null);
+  // The Pay button is hidden when outstanding is exactly "0.00" (the API's 2-dp string form). Overdue
+  // flags and days overdue come from the backend; the client does not compute them.
   return (
     <Card id="bills" aria-labelledby="bills-title">
       <CardHeader

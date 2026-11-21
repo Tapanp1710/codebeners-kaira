@@ -1,11 +1,20 @@
 "use client";
 
+/**
+ * Shared modal used by the payment, customer, bill and reminder dialogs. Client component because
+ * it drives the imperative HTMLDialogElement API (showModal/close) from React state.
+ */
 import { X } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
 
 import { cn } from "./primitives";
 
-/** Accessible modal built on the native <dialog> (focus trap, Esc to close, inert background). */
+/**
+ * Accessible modal built on the native <dialog> (focus trap, Esc to close, inert background).
+ * Fully controlled: `open` decides visibility and `onClose` should set it to false in the parent.
+ * `onClose` can run more than once per closing (button/Esc, then the native `close` event fired when
+ * the effect calls el.close()), so it must be idempotent.
+ */
 export function Dialog({
   open,
   onClose,
@@ -22,6 +31,8 @@ export function Dialog({
   wide?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  // Mirrors `open` onto the element. Where showModal/close are missing (older browsers, jsdom in tests)
+  // it falls back to toggling the `open` attribute, which shows the dialog without modal behaviour.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -35,6 +46,9 @@ export function Dialog({
     }
   }, [open]);
 
+  // Esc's `cancel` event is prevented and routed to onClose so React state stays the source of truth.
+  // Children render only while open, which resets uncontrolled inner state and keeps the fixed
+  // "dialog-title" id unique in the DOM (only an open dialog renders its heading).
   return (
     <dialog
       ref={ref}

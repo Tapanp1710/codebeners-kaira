@@ -1,5 +1,15 @@
 "use client";
 
+/**
+ * Create / edit customer dialog, used by app/(app)/customers/page.tsx (create, then navigate to the new
+ * customer via onSaved) and app/(app)/customers/[id]/page.tsx (edit).
+ *
+ * Form state is react-hook-form validated by a zod schema. Saving calls:
+ *   - POST  /customers       (useCreateCustomer) when no `customer` prop is given
+ *   - PATCH /customers/{id}  (useUpdateCustomer) when editing
+ * Both only invalidate customer queries (customer edits do not touch the ledger), and the update also
+ * writes the response straight into the single-customer cache entry.
+ */
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -15,13 +25,20 @@ import type { CustomerDetail, Schemas } from "@/lib/api/types";
 // Mirrors CustomerCreate limits in the contract; the backend remains authoritative.
 export const customerSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(200),
+  // Optional fields accept "" because unfilled inputs submit empty strings; clean() turns them into null.
+  // Phone has only a length cap: no format check is done here.
   phone: z.string().trim().max(32).optional().or(z.literal("")),
+  // z.email() is the zod v4 top-level validator.
   email: z.union([z.literal(""), z.email("Enter a valid email")]).optional(),
   address: z.string().max(2000).optional().or(z.literal("")),
   notes: z.string().max(4000).optional().or(z.literal("")),
 });
 type Values = z.infer<typeof customerSchema>;
 
+/**
+ * Form values -> API body. Trims every field and sends blank optionals as null. On edit the same full
+ * body goes to PATCH, so clearing a field explicitly sets it to null rather than leaving it unchanged.
+ */
 const clean = (v: Values): Schemas["CustomerCreate"] => ({
   name: v.name.trim(),
   phone: v.phone?.trim() || null,
@@ -30,6 +47,10 @@ const clean = (v: Values): Schemas["CustomerCreate"] => ({
   notes: v.notes?.trim() || null,
 });
 
+/**
+ * @param customer when present the dialog edits this customer, otherwise it creates one
+ * @param onSaved  receives the saved customer's id (the list page uses it to open the new customer)
+ */
 export function CustomerFormDialog({
   open,
   onClose,
@@ -42,8 +63,12 @@ export function CustomerFormDialog({
   onSaved?: (id: string) => void;
 }) {
   const toast = useToast();
+  // Both hooks are always created (rules of hooks); the "" id for create mode is never used because
+  // `mutation` below picks `create` when there is no customer.
   const create = useCreateCustomer();
   const update = useUpdateCustomer(customer?.id ?? "");
+  // `values` (rather than defaultValues) re-syncs the form whenever the customer prop changes, e.g.
+  // after the detail query refetches.
   const form = useForm<Values>({
     resolver: zodResolver(customerSchema),
     values: {
@@ -64,6 +89,9 @@ export function CustomerFormDialog({
       onSaved?.(saved.id);
       onClose();
     } catch (err) {
+      // Backend VALIDATION_ERROR details are mapped onto the matching inputs (by the last `loc` segment);
+      // errors for unknown fields are dropped here. Any non-validation error is shown via the FormError
+      // below, which reads mutation.error rather than this catch block.
       if (err instanceof ApiError) {
         for (const [field, message] of Object.entries(err.fieldErrors())) {
           if (field in values) form.setError(field as keyof Values, { message });

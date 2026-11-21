@@ -1,5 +1,9 @@
 import { Button } from "./primitives";
 
+/**
+ * Previous/next pagination for server-paged lists (customers, invoices, receivables, actions).
+ * `page` is 1-based and owned by the caller; with a single page only the total count is shown.
+ */
 export function Pager({ page, total, pageSize, onPage }: { page: number; total: number; pageSize: number; onPage: (p: number) => void }) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
   if (pages <= 1) return <p className="mt-3 text-xs text-muted">{total} total</p>;

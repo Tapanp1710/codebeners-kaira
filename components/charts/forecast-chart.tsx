@@ -1,5 +1,16 @@
 "use client";
 
+/**
+ * Recharts visualisations for the cash forecast and the what-if simulation.
+ *
+ * Pure presentational components: they receive points from the API (GET /cashflow/forecast via
+ * useForecast, POST /cashflow/simulate via useSimulation) and fetch nothing themselves. Consumers load
+ * this module with next/dynamic and `ssr: false` (dashboard-view.tsx, app/(app)/cashflow/page.tsx,
+ * app/(app)/scenarios/page.tsx), keeping Recharts out of the server render and the initial bundle.
+ *
+ * Money rule: API values are decimal strings. They are converted to JS numbers with chartNumber() ONLY
+ * for plot geometry; tooltips and the table read the original strings from `raw` and format them exactly.
+ */
 import {
   Area,
   Bar,
@@ -20,15 +31,26 @@ import type { Schemas } from "@/lib/api/types";
 import { formatDate, formatShortDate } from "@/lib/format/dates";
 import { chartNumber, formatMoney, formatMoneyCompact } from "@/lib/format/money";
 
+// Literal hex values because Recharts takes colours as SVG attributes, not Tailwind classes. They match
+// the theme (steel balance, sage inflow) and use a separate "simulated" colour so hypothetical values
+// never look like projected ones.
 const COLORS = { balance: "#415a77", inflow: "#778d7a", outflow: "#b07a5f", threshold: "#9e3f2a", simulated: "#6b5a8e" };
 
+// { date: "YYYY-MM-DD", inflow, outflow, balance } with money as decimal strings; outflow is positive.
 type Point = Schemas["ForecastPointOut"];
 
 /**
  * Projected balance (area) with expected inflows/outflows (bars). Numbers are converted only for chart
  * geometry; every label and tooltip shows the backend's exact decimal string.
+ *
+ * @param points    one ForecastPointOut per day or week (granularity is chosen by the caller's query)
+ * @param threshold the business's shortfall threshold (decimal string); drawn as a dashed reference line
+ * @param height    plot height in px
+ * @param compact   dashboard mode: hides legend, inflow/outflow bars and the table alternative
  */
 export function ForecastChart({ points, threshold, height = 320, compact }: { points: Point[]; threshold?: string; height?: number; compact?: boolean }) {
+  // Outflow is negated so its bars hang below the zero line; `raw` keeps the untouched API point for
+  // the tooltip.
   const data = points.map((p) => ({
     date: p.date,
     balance: chartNumber(p.balance),
@@ -36,6 +58,12 @@ export function ForecastChart({ points, threshold, height = 320, compact }: { po
     outflow: -chartNumber(p.outflow),
     raw: p,
   }));
+  // Accessibility: the SVG plot is aria-hidden; screen readers get the sr-only figcaption and (outside
+  // compact mode) the "View as table" data table. The table lists only dates with a non-zero inflow or
+  // outflow, plus the first and last point, to keep a 90-day daily series readable.
+  // Rendering: axis ticks use compact ₹K/L/Cr labels (display only); the tooltip maps each series name
+  // back to the exact string on `raw`, so outflow shows as the positive amount the API sent. The balance
+  // is a stepAfter area, holding each value until the next point.
   return (
     <figure>
       <div style={{ height }} aria-hidden="true">
@@ -104,8 +132,17 @@ export function ForecastChart({ points, threshold, height = 320, compact }: { po
   );
 }
 
+/**
+ * Baseline vs simulated balance for the Scenarios page. The simulated series is dashed and uses the
+ * distinct "simulated" colour so hypothetical numbers are never confused with the projection. There is
+ * no table here: the scenarios page renders its own comparison table. The only current caller does not
+ * pass `threshold`.
+ */
 export function SimulationChart({ points, threshold }: { points: Schemas["SimulationPointOut"][]; threshold?: string }) {
+  // Same pattern as ForecastChart: numbers for geometry, `raw` strings for the tooltip.
   const data = points.map((p) => ({ date: p.date, baseline: chartNumber(p.baseline_balance), simulated: chartNumber(p.simulated_balance), raw: p }));
+  // Both series are stepAfter lines without dots; the tooltip labels each value as "projected" or
+  // "hypothetical" so the two are never read as the same kind of figure.
   return (
     <figure>
       <div style={{ height: 320 }} aria-hidden="true">

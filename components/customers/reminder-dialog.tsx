@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * Payment-reminder drafting. `ReminderDialog` asks the backend for a draft (POST /assistant/reminder via
+ * useReminder) and `ReminderDraft` shows it for editing and copying.
+ *
+ * Used from the customer detail page (whole customer balance), the receivables page (optionally scoped to
+ * one invoice) and, for ReminderDraft only, the voice assistant panel when extraction returns a reminder.
+ * The backend computes the outstanding/overdue figures from the ledger; the client sends only ids,
+ * language and tone. Nothing is sent to the customer by KAIRA.
+ */
 import { Copy } from "lucide-react";
 import { useState } from "react";
 
@@ -13,8 +22,13 @@ import type { LanguageCode, Reminder } from "@/lib/api/types";
 
 /** Editable reminder draft. KAIRA never sends it; the owner copies it into WhatsApp/SMS themselves. */
 export function ReminderDraft({ reminder }: { reminder: Reminder }) {
+  // Local copy of the message: edits stay in the browser and are never saved back to the server.
+  // State is seeded once from the prop; ReminderDialog keys the draft by message so a new draft remounts it.
   const [text, setText] = useState(reminder.message);
   const [copied, setCopied] = useState(false);
+  // `generated_by` tells whether the text is the English template or a Sarvam translation of it.
+  // Copy uses the async Clipboard API (secure context required); a rejected write is not caught, so the
+  // label simply stays "Copy text".
   return (
     <div className="space-y-3 rounded-2xl bg-paper p-5 ring-1 ring-line" data-testid="reminder-draft">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -43,6 +57,12 @@ export function ReminderDraft({ reminder }: { reminder: Reminder }) {
   );
 }
 
+/**
+ * Language/tone picker that requests a reminder draft.
+ *
+ * @param customerId customer whose outstanding balance the reminder covers
+ * @param invoiceId  optional: limit the reminder to one invoice (sent as null otherwise)
+ */
 export function ReminderDialog({
   open,
   onClose,
@@ -56,6 +76,10 @@ export function ReminderDialog({
 }) {
   const [language, setLanguage] = useState<LanguageCode>("en-IN");
   const [tone, setTone] = useState<"friendly" | "firm">("friendly");
+  // A plain mutation with no cache invalidation: drafting a reminder changes no data. Each click requests
+  // a new draft; the result is keyed by message text so a different draft resets the editable copy.
+  // For te-IN/hi-IN the backend needs its Sarvam key; without it the backend returns English (the
+  // notice below warns about this).
   const reminder = useReminder();
   return (
     <Dialog open={open} onClose={onClose} title="Draft a payment reminder" description="Uses the real outstanding figures. Nothing is sent automatically." wide>

@@ -1,5 +1,19 @@
 "use client";
 
+/**
+ * ProposalCard: the human-in-the-loop review surface for assistant proposals.
+ *
+ * The assistant (`POST /assistant/extract`) never writes to the books. It returns a ProposedAction with
+ * status `pending`; this card shows what was understood (transcript, intent, customer/invoice resolution,
+ * fields, backend-computed values, transcript evidence, warnings, confidence) and lets the owner:
+ *   - Edit    -> `PATCH /actions/{id}` with the FULL rebuilt operation list (useEditAction)
+ *   - Reject  -> `POST /actions/{id}/reject` (useRejectAction)
+ *   - Approve -> `POST /actions/{id}/approve` (useApproveAction), which executes the operations server-side
+ *
+ * Used by app/(app)/actions/page.tsx (proposal list) and components/voice/assistant-panel.tsx (fresh
+ * proposal right after extraction). All validation of approvability is the backend's: the card only
+ * mirrors `can_approve`, `warnings[].blocking` and `missing_fields` from the response.
+ */
 import { AlertTriangle, Check, CheckCircle2, Pencil, Quote, X, XCircle } from "lucide-react";
 import { useState } from "react";
 
@@ -25,8 +39,15 @@ import {
 
 type Resolution = Schemas["ResolutionOut"];
 
+/**
+ * Formats one operation field / computed value for read-only display. Money keys stay decimal strings
+ * and go through the exact BigInt formatter; date keys are formatted as calendar dates without Date
+ * parsing (no timezone shift). Empty values render as an em dash.
+ */
 function displayValue(key: string, value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
+  // amount_is_remaining=true means the speaker said "the rest/balance" rather than a figure; the actual
+  // number then appears under computed.remaining_amount.
   if (key === "amount_is_remaining") return value ? "The remaining balance" : "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (MONEY_FIELDS.has(key)) return formatMoney(String(value));
@@ -36,6 +57,12 @@ function displayValue(key: string, value: unknown): string {
   return String(value);
 }
 
+/**
+ * One row showing how the backend matched a spoken customer/invoice to a ledger record.
+ * Status values come from ResolutionOut: `resolved` (single match), `new` (record will be created on
+ * approval), `ambiguous` (several candidates, owner must pick via Edit) or `not_found`.
+ * `not_applicable` (the intent has no such entity) renders nothing.
+ */
 function ResolutionLine({ title, res, testId }: { title: string; res: Resolution; testId: string }) {
   if (res.status === "not_applicable") return null;
   const tone = res.status === "resolved" ? "good" : res.status === "new" ? "info" : res.status === "ambiguous" ? "warn" : "danger";
@@ -63,9 +90,18 @@ function ResolutionLine({ title, res, testId }: { title: string; res: Resolution
   );
 }
 
+/**
+ * Read-only view of a single operation inside a proposal (a proposal can carry several).
+ * `evidence` is pre-filtered by the caller to this operation's index.
+ */
 function OperationView({ op, evidence }: { op: OperationOut; evidence: Schemas["EvidenceOut"][] }) {
+  // Raw ids are hidden (the ResolutionLines show the matched labels instead); `items` is an array of
+  // invoice lines that is not itemised here.
   const fieldEntries = Object.entries(op.fields).filter(([k]) => !["items", "customer_id", "invoice_id"].includes(k));
   const computed = Object.entries(op.computed ?? {});
+  // Evidence rows quote the transcript fragment the model claimed for each field. `verified: false`
+  // means the backend could not find that fragment in the transcript and ignored the value, which is
+  // surfaced to the owner rather than hidden.
   return (
     <div className="rounded-xl bg-white/60 p-4 ring-1 ring-line" data-testid="proposal-operation">
       <p className="font-display text-base font-semibold" data-testid="operation-intent">{INTENT_LABEL[op.type]}</p>
@@ -110,6 +146,8 @@ function OperationView({ op, evidence }: { op: OperationOut; evidence: Schemas["
 }
 
 // ------------------------------------------------------------------ editing
+// Editable subset of an operation, held as strings so it binds directly to inputs. Money stays a
+// decimal string and dates stay YYYY-MM-DD; an empty string means "not set" and is dropped by toOperation.
 type Draft = {
   customer_id: string;
   invoice_id: string;
@@ -121,11 +159,13 @@ type Draft = {
   description: string;
 };
 
+/** Seeds an edit draft from the presented operation, taking ids from the backend's resolutions. */
 function toDraft(op: OperationOut): Draft {
   const f = op.fields as Record<string, unknown>;
   return {
     customer_id: op.customer.id ?? "",
     invoice_id: op.invoice.id ?? "",
+    // When no explicit amount was spoken ("pay the rest"), pre-fill with the backend-computed remaining amount.
     amount: f.amount ? String(f.amount) : op.computed?.remaining_amount ? String(op.computed.remaining_amount) : "",
     date: (f.date as string) ?? "",
     expected_payment_date: (f.expected_payment_date as string) ?? "",
@@ -137,13 +177,20 @@ function toDraft(op: OperationOut): Draft {
 
 /** Rebuilds a contract Operation from the presented operation plus the owner's edits. */
 export function toOperation(op: OperationOut, draft: Draft): Operation {
+  // Start from the original field bag so fields the editor does not expose (items, category, vendor_name,
+  // phone, ...) survive the PATCH unchanged.
   const base = { ...(op.fields as Record<string, unknown>), type: op.type } as Record<string, unknown>;
+  // An emptied input removes the key rather than sending "", so the backend sees the field as absent.
   const set = (k: string, v: string) => {
     if (v) base[k] = v;
     else delete base[k];
   };
   set("customer_id", draft.customer_id);
   set("invoice_id", draft.invoice_id);
+  // Amount rules: an amount different from computed.remaining_amount is sent as an explicit figure and
+  // clears amount_is_remaining; an emptied amount is removed; an amount equal to remaining_amount leaves
+  // the original fields untouched, so a "pay the remaining balance" proposal keeps that meaning instead of
+  // freezing today's figure.
   if (draft.amount && draft.amount !== String(op.computed?.remaining_amount ?? "")) {
     base.amount = draft.amount;
     base.amount_is_remaining = false;
@@ -156,23 +203,36 @@ export function toOperation(op: OperationOut, draft: Draft): Operation {
   return base as Operation;
 }
 
+/**
+ * Inline editor for one operation. Which inputs appear depends on the intent (op.type); the draft is
+ * lifted to ProposalCard so all operations are saved together.
+ */
 function EditOperation({ op, draft, onChange }: { op: OperationOut; draft: Draft; onChange: (d: Draft) => void }) {
   const f = op.fields as Record<string, unknown>;
   const has = (k: string) => k in f || ["record_payment", "create_payment_commitment"].includes(op.type);
   const update = (k: keyof Draft) => (e: { target: { value: string } }) => onChange({ ...draft, [k]: e.target.value });
+  // GET /customers (first 200) supplies the full choice list; customers beyond 200 are not selectable here.
   const allCustomers = useCustomers({ page_size: 200 });
+  // Open invoices of the chosen customer (GET /invoices?customer_id&status=open) are only fetched for
+  // payment/commitment intents and only once a customer is chosen (the hook's `enabled` flag).
   const needsInvoice = op.type === "record_payment" || op.type === "create_payment_commitment";
   const openInvoices = useInvoices({ customer_id: draft.customer_id, status: "open", page_size: 200 }, needsInvoice && !!draft.customer_id);
+  // The backend's match candidates are listed first, then every other customer, de-duplicated by id.
   const customerOptions = [
     ...op.customer.candidates.map((c) => ({ id: c.id, label: c.label })),
     ...(allCustomers.data?.items ?? [])
       .filter((c) => !op.customer.candidates.some((x) => x.id === c.id))
       .map((c) => ({ id: c.id, label: c.name })),
   ];
+  // Until the open-invoice query returns, fall back to the invoice candidates from the proposal.
   const invoiceOptions =
     draft.customer_id && openInvoices.data
       ? openInvoices.data.items.map((i) => ({ id: i.id, label: `${i.invoice_number} (due ${formatDate(i.due_date)})`, outstanding: i.outstanding }))
       : op.invoice.candidates;
+  // Field visibility by intent: the customer picker is hidden for `new` customers (created on approval);
+  // changing customer clears the invoice choice. For commitments an empty invoice means "whole customer
+  // balance". The amount input is validated client-side with isValidAmount (positive, <= 2 decimals) for
+  // feedback only; the backend re-validates on PATCH.
   return (
     <div className="grid gap-3 rounded-xl bg-white/60 p-4 ring-1 ring-line sm:grid-cols-2">
       <p className="font-display font-semibold sm:col-span-2">{INTENT_LABEL[op.type]}</p>
@@ -241,7 +301,18 @@ function EditOperation({ op, draft, onChange }: { op: OperationOut; draft: Draft
 }
 
 // ------------------------------------------------------------------ card
+/**
+ * Review card for one ProposedAction.
+ *
+ * @param action   proposal as returned by the API; copied into local state (`current`) and replaced by
+ *                 each mutation response, so the card reflects the server's latest view without waiting
+ *                 for a list refetch. Callers key the card by id (and updated_at on the actions page) so a
+ *                 refetched proposal remounts it with fresh state.
+ * @param onChange optional callback receiving each updated proposal (no current caller passes it).
+ */
 export function ProposalCard({ action, onChange }: { action: ProposedAction; onChange?: (a: ProposedAction) => void }) {
+  // isOwner = session.user.role === "owner". It only hides Approve/Reject for staff; the backend
+  // enforces the role independently (403 FORBIDDEN).
   const { isOwner } = useSession();
   const toast = useToast();
   const [current, setCurrent] = useState(action);
@@ -251,6 +322,8 @@ export function ProposalCard({ action, onChange }: { action: ProposedAction; onC
   const approve = useApproveAction(current.id);
   const reject = useRejectAction(current.id);
   const edit = useEditAction(current.id);
+  // While any of the three mutations is in flight, every action button is disabled, so the owner cannot
+  // e.g. approve while an edit is still being saved. Mutations are not auto-retried.
   const busy = approve.isPending || reject.isPending || edit.isPending;
 
   const update = (a: ProposedAction) => {
@@ -258,6 +331,11 @@ export function ProposalCard({ action, onChange }: { action: ProposedAction; onC
     onChange?.(a);
   };
 
+  /**
+   * Approve waits for the backend to execute the operations. On success the hook invalidates "actions"
+   * plus every ledger-derived query (invalidateFinancial). The success toast fires only when the returned
+   * status is `executed`; a `failed` result is shown through the status badge instead.
+   */
   async function onApprove() {
     setError(null);
     try {
@@ -265,10 +343,12 @@ export function ProposalCard({ action, onChange }: { action: ProposedAction; onC
       update(result.action);
       if (result.action.status === "executed") toast("Approved and recorded in your books.");
     } catch (err) {
+      // ApiError message from the backend envelope (e.g. FORBIDDEN, conflict) or a network/timeout message.
       setError(describeError(err));
     }
   }
 
+  // Reject sends no reason (empty body) and only invalidates the "actions" queries: nothing was written to the ledger.
   async function onReject() {
     setError(null);
     try {
@@ -280,6 +360,10 @@ export function ProposalCard({ action, onChange }: { action: ProposedAction; onC
     }
   }
 
+  /**
+   * Saves edits by sending every operation (edited or not) to PATCH /actions/{id}. The response is a
+   * re-evaluated proposal with fresh resolutions, warnings and `can_approve`; edit mode only closes on success.
+   */
   async function onSaveEdit() {
     setError(null);
     try {
@@ -293,6 +377,7 @@ export function ProposalCard({ action, onChange }: { action: ProposedAction; onC
   }
 
   const pending = current.status === "pending";
+  // `result` is untyped in the contract; only the per-operation `summary` strings are read, defensively.
   const results = (current.result as { operations?: { summary?: string }[] } | null)?.operations ?? [];
 
   return (
