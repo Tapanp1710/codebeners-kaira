@@ -50,9 +50,13 @@ contracts/                   imported backend contract + version record
   ledger-derived view (dashboard, insights, customers, invoices, receivables, forecast, bills, commitments, audit).
   Customer edits only refresh customer data.
 * Payments send an `Idempotency-Key` created once per submission and reused on retry.
-* **Bill payment recovery** (`lib/api/payment-attempt.ts`, `components/cashflow/bills-panel.tsx`):
+* **Payment recovery** for bill payments (`components/cashflow/bills-panel.tsx`) and invoice payments
+  (`components/invoices/payment-form.tsx`), both built on one shared store in `lib/api/payment-attempt.ts`:
   * The first submit saves an *attempt* (the key plus the exact request body) to `localStorage`, before the request is
-    sent. The storage key is `kaira:bill-payment-attempt:v1:<businessId>:<billId>`.
+    sent. The storage keys are `kaira:bill-payment-attempt:v1:<businessId>:<billId>` and
+    `kaira:invoice-payment-attempt:v1:<businessId>:<invoiceId>`. Each kind has its own lock and channel names.
+  * For invoices, the frozen body also includes the reference and notes. While a payment is pending, the invoice page
+    shows "Resolve payment" (even if the invoice now reads fully paid) and hides Void.
   * The attempt is removed only when the backend confirms an outcome:
     * success, whether newly recorded or replayed;
     * a processed 4xx rejection, which means nothing was recorded.
