@@ -13,10 +13,10 @@ import Link from "next/link";
 import { use, useState } from "react";
 
 import { useToast } from "@/components/providers";
-import { PaymentDialog } from "@/components/invoices/payment-form";
+import { PaymentDialog, useInvoicePaymentPending } from "@/components/invoices/payment-form";
 import { DataTable, Money, PAYMENT_METHOD_LABEL, PaymentStatusBadge, td, tdNum, th, thNum } from "@/components/ui/finance";
 import { FormError } from "@/components/ui/form";
-import { Button, Card, CardHeader, EmptyState, ErrorState, LoadingBlock, PageHeader, Stat } from "@/components/ui/primitives";
+import { Button, Card, CardHeader, EmptyState, ErrorState, LoadingBlock, Notice, PageHeader, Stat } from "@/components/ui/primitives";
 import { describeError } from "@/lib/api/errors";
 import { useInvoice, useInvoicePayments, useUpdateInvoice } from "@/lib/api/hooks";
 import { formatDate } from "@/lib/format/dates";
@@ -30,6 +30,8 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
   const update = useUpdateInvoice(id);
   const toast = useToast();
   const [paying, setPaying] = useState(false);
+  // An earlier payment on this invoice whose outcome is unknown (saved in this browser, any tab or session).
+  const pendingPayment = useInvoicePaymentPending(id);
   const i = invoice.data;
 
   // Early returns sit after all hooks. Not-found or forbidden invoices surface as an ApiError with retry.
@@ -40,7 +42,8 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
   // 2-decimal strings, never as floats.
   const canPay = i.lifecycle_status === "issued" && i.outstanding !== "0.00";
   // Voiding is only offered while nothing has been paid, so no recorded payment is left on a void invoice.
-  const canVoid = i.lifecycle_status === "issued" && i.paid === "0.00";
+  // It is also withheld while a payment is unconfirmed: that payment may already be recorded.
+  const canVoid = i.lifecycle_status === "issued" && i.paid === "0.00" && !pendingPayment;
 
   /**
    * Asks for a browser confirmation, then PATCHes the lifecycle status. The non-null assertions are needed
@@ -73,10 +76,20 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
           <>
             {/* Each action renders only when canVoid / canPay allow it; Void shows a spinner while its PATCH is pending. */}
             {canVoid && <Button variant="secondary" onClick={onVoid} loading={update.isPending}><Ban className="size-4" aria-hidden="true" /> Void</Button>}
-            {canPay && <Button onClick={() => setPaying(true)} data-testid="record-payment"><IndianRupee className="size-4" aria-hidden="true" /> Record payment</Button>}
+            {/* A pending payment is always resumable, even if the invoice now shows nothing outstanding or was voided. */}
+            {pendingPayment ? (
+              <Button onClick={() => setPaying(true)} data-testid="resolve-payment"><IndianRupee className="size-4" aria-hidden="true" /> Resolve payment</Button>
+            ) : (
+              canPay && <Button onClick={() => setPaying(true)} data-testid="record-payment"><IndianRupee className="size-4" aria-hidden="true" /> Record payment</Button>
+            )}
           </>
         }
       />
+      {pendingPayment && !paying && (
+        <Notice tone="warn" title="Payment awaiting confirmation">
+          A payment on this invoice could not be confirmed. Open &ldquo;Resolve payment&rdquo; to retry it; retrying cannot record it twice.
+        </Notice>
+      )}
       {/* Void failures land here (onVoid swallows them on purpose); the error stays until the next void attempt. */}
       <FormError message={update.error ? describeError(update.error) : null} />
       <div className="mb-6 flex flex-wrap items-center gap-2">
