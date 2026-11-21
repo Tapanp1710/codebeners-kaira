@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+build/
+next-env.d.ts
+*.tsbuildinfo
+
+# env (never commit real configuration)
+.env
+.env.local
+.env.*.local
+.env.production
+
+# tests
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+e2e/.auth/
+
+# misc
+*.log
+.DS_Store
+.run/
+.vscode/
+.codebenders/
