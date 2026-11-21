@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     MAX_AUDIO_UPLOAD_BYTES: int = 5_000_000
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 10
     RATE_LIMIT_AI_PER_MINUTE: int = 30
+    # Per user: payment-attempt register/execute/cancel and action approval. Generous; it stops runaway
+    # clients and scripted abuse, not normal use.
+    RATE_LIMIT_PAYMENT_PER_MINUTE: int = 60
+    # postgres: counters shared by all workers/containers. memory: per-process, single-worker only.
+    RATE_LIMIT_BACKEND: Literal["postgres", "memory"] = "postgres"
 
     # --- Sarvam AI ------------------------------------------------------------------------
     SARVAM_API_KEY: str | None = None

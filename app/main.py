@@ -12,7 +12,7 @@ from app.core.config import Settings, get_settings
 from app.core.handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
-from app.core.rate_limit import RateLimiter
+from app.core.rate_limit import PostgresRateLimiter, RateLimiter
 from app.core.security import CSRF_HEADER
 from app.db.session import build_engine, build_session_factory
 from app.integrations.sarvam import SarvamClient
@@ -73,8 +73,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
-    # Counters live in this process only; with multiple workers, each worker has its own limits.
-    app.state.rate_limiter = RateLimiter()
+    # Shared across workers and containers by default (PostgreSQL); "memory" is single-process only.
+    app.state.rate_limiter = (
+        PostgresRateLimiter(engine) if settings.RATE_LIMIT_BACKEND == "postgres" else RateLimiter()
+    )
     # Construction does no network I/O. A missing SARVAM_API_KEY surfaces per call, not at startup.
     app.state.sarvam = SarvamClient(settings)
     app.state.ready = False

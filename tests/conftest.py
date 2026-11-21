@@ -70,6 +70,7 @@ def settings(database_url: str) -> Settings:
         LOG_FORMAT="text",
         RATE_LIMIT_LOGIN_PER_MINUTE=1000,
         RATE_LIMIT_AI_PER_MINUTE=1000,
+        RATE_LIMIT_PAYMENT_PER_MINUTE=1000,
         AI_EXTRACTION_PROVIDER="rules",
         SARVAM_API_KEY=None,
         SARVAM_MAX_RETRIES=0,

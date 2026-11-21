@@ -44,13 +44,38 @@ built-in default secret.
 ## Request hardening
 
 Body limit 1 MB (5 MB for audio upload), checked on Content-Length **and** on streamed bodies. Audio is
-validated by magic bytes. Rate limits apply per IP and per e-mail on login, and per user on AI/voice
-(in-process sliding window: fine for one instance; use a gateway limiter when scaling horizontally).
+validated by magic bytes.
+
+Rate limits, all per minute:
+- **Login:** per IP and per e-mail (`RATE_LIMIT_LOGIN_PER_MINUTE`).
+- **AI and voice** (STT, LLM extraction, TTS): per user (`RATE_LIMIT_AI_PER_MINUTE`).
+- **Payment-attempt register/execute/cancel and action approval:** per user (`RATE_LIMIT_PAYMENT_PER_MINUTE`).
+
+The counters are kept in **PostgreSQL** (`rate_limit_buckets`, `RATE_LIMIT_BACKEND=postgres`, the default). Every
+uvicorn worker and every API container therefore shares one budget per key. The image runs 2 workers, so a
+per-process limiter would have allowed twice the configured login attempts. This is verified across separate OS
+processes in `tests/api/test_rate_limit_shared.py`.
+
+The algorithm is a sliding window approximated from two fixed windows, using the database clock. Each check commits
+independently of the request, so a failed request still counts. `RATE_LIMIT_BACKEND=memory` keeps the old
+in-process limiter and is correct only for a single worker.
+
+Token refresh is deliberately not rate limited. Refresh tokens are single-use, rotating and high-entropy, and a
+per-IP key would throttle every user behind a shared proxy (see "Client IP" below).
+
+## Client IP
+
+The login per-IP key uses the address uvicorn reports. Uvicorn trusts `X-Forwarded-For` only from
+`FORWARDED_ALLOW_IPS` (default `127.0.0.1`). List the frontend server there **only if** its proxy does not
+pass through a browser-supplied `X-Forwarded-For`. Otherwise a client could choose its own rate-limit key. That is a
+requirement on the frontend proxy (`lib/server/proxy.ts` in kaira-frontend).
+
+When `FORWARDED_ALLOW_IPS` doesn't list the frontend server, every request appears to come from the frontend server,
+so the per-IP login budget is shared and the per-e-mail limit still applies.
 CORS uses an explicit allow-list with credentials. Requests carry `X-Request-ID`, and logs are structured
 JSON without secrets (httpx URL logging is silenced). The server header is disabled.
 
 ## Known limitations / follow-ups
 
-* The rate limiter is per process (multi-worker deployments multiply the limits).
 * No account self-service (password reset, user invitations). Users are created with `python -m app.cli create-owner` or by the seed.
 * Dependency audit runs in CI (`pip-audit`). It was not run locally.

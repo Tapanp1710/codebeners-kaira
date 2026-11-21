@@ -3,9 +3,9 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Query, Request
 
-from app.db.dependencies import Auth, DbSession, OwnerAuth
+from app.db.dependencies import Auth, DbSession, OwnerAuth, SettingsDep
 from app.schemas.ai import ActionUpdate, ApprovalOut, ProposedActionOut
 from app.schemas.common import Envelope, Page, ok
 from app.services.ai import action_service
@@ -50,7 +50,10 @@ def edit_action(action_id: uuid.UUID, body: ActionUpdate, ctx: Auth, db: DbSessi
     response_model=Envelope[ApprovalOut],
     summary="Owner approval: execute the proposal transactionally (idempotent)",
 )
-def approve_action(action_id: uuid.UUID, ctx: OwnerAuth, db: DbSession):
+def approve_action(
+    action_id: uuid.UUID, ctx: OwnerAuth, db: DbSession, request: Request, settings: SettingsDep
+):
+    request.app.state.rate_limiter.check(f"pay:{ctx.user_id}", settings.RATE_LIMIT_PAYMENT_PER_MINUTE)
     try:
         action, replayed = action_service.approve(db, ctx, action_id)
         db.commit()

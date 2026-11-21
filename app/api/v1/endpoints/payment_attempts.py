@@ -15,12 +15,12 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.v1 import presenters
-from app.db.dependencies import Auth, DbSession
+from app.db.dependencies import Auth, DbSession, SettingsDep
 from app.models import Bill, BillPayment, Customer, Invoice, Payment, PaymentAttempt
 from app.schemas.common import Envelope, Page, ok
 from app.schemas.core import BillPaymentOut, BillPaymentRecordedOut, PaymentRecordedOut
@@ -34,6 +34,11 @@ from app.schemas.payment_attempts import (
 from app.services import bill_service, invoice_service, payment_attempt_service
 
 router = APIRouter(prefix="/payment-attempts", tags=["payment-attempts"])
+
+
+def _limit(request: Request, ctx, settings) -> None:
+    # Shared across workers (app/core/rate_limit.py); same per-user budget as action approval.
+    request.app.state.rate_limiter.check(f"pay:{ctx.user_id}", settings.RATE_LIMIT_PAYMENT_PER_MINUTE)
 
 
 def _labels(db: Session, attempts: list[PaymentAttempt]) -> dict[uuid.UUID, str]:
@@ -121,7 +126,15 @@ def _detail(db: Session, ctx, a: PaymentAttempt, replayed: bool = True) -> Payme
     status_code=201,
     summary="Register an intended invoice or bill payment (200 when an existing attempt is returned)",
 )
-def register_attempt(body: PaymentAttemptCreate, ctx: Auth, db: DbSession, response: Response):
+def register_attempt(
+    body: PaymentAttemptCreate,
+    ctx: Auth,
+    db: DbSession,
+    response: Response,
+    request: Request,
+    settings: SettingsDep,
+):
+    _limit(request, ctx, settings)
     reg = payment_attempt_service.register(db, ctx, body)
     db.commit()
     if not reg.created:
@@ -169,7 +182,8 @@ def get_attempt(attempt_id: uuid.UUID, ctx: Auth, db: DbSession):
     response_model=Envelope[PaymentAttemptDetailOut],
     summary="Execute or safely retry the frozen payment (same key, same request)",
 )
-def execute_attempt(attempt_id: uuid.UUID, ctx: Auth, db: DbSession):
+def execute_attempt(attempt_id: uuid.UUID, ctx: Auth, db: DbSession, request: Request, settings: SettingsDep):
+    _limit(request, ctx, settings)
     outcome = payment_attempt_service.execute(db, ctx, attempt_id)
     # Commit the attempt's new state (with the payment, atomically) before reporting a rejection.
     db.commit()
@@ -183,7 +197,8 @@ def execute_attempt(attempt_id: uuid.UUID, ctx: Auth, db: DbSession):
     response_model=Envelope[PaymentAttemptDetailOut],
     summary="Cancel a pending attempt; refused (409) if any payment exists under its key",
 )
-def cancel_attempt(attempt_id: uuid.UUID, ctx: Auth, db: DbSession):
+def cancel_attempt(attempt_id: uuid.UUID, ctx: Auth, db: DbSession, request: Request, settings: SettingsDep):
+    _limit(request, ctx, settings)
     outcome = payment_attempt_service.cancel(db, ctx, attempt_id)
     db.commit()
     if outcome.error is not None:

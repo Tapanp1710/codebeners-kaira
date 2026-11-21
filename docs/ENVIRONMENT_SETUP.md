@@ -50,7 +50,8 @@ Every script checks exit codes and stops with `FAILED …` and a non-zero exit c
 | `COOKIE_SECURE`, `COOKIE_SAMESITE`, `COOKIE_DOMAIN` | false, lax, – | prod: secure=true | cookie flags |
 | `FRONTEND_ORIGIN`, `CORS_ORIGINS` | http://localhost:3000 | – | allowed browser origins (comma-separated) |
 | `MAX_REQUEST_BYTES`, `MAX_AUDIO_UPLOAD_BYTES` | 1 MB, 5 MB | – | request limits |
-| `RATE_LIMIT_LOGIN_PER_MINUTE`, `RATE_LIMIT_AI_PER_MINUTE` | 10, 30 | – | throttling |
+| `RATE_LIMIT_LOGIN_PER_MINUTE`, `RATE_LIMIT_AI_PER_MINUTE`, `RATE_LIMIT_PAYMENT_PER_MINUTE` | 10, 30, 60 | – | throttling |
+| `RATE_LIMIT_BACKEND` | postgres | – | `postgres` shares limits across workers and containers; `memory` is single-process only |
 | `SARVAM_API_KEY` | – | for voice/LLM | enables Sarvam |
 | `SARVAM_BASE_URL` | https://api.sarvam.ai | – | |
 | `SARVAM_STT_MODEL`, `SARVAM_STT_MODE` | saaras:v4, transcribe | – | |

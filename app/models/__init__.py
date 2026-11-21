@@ -8,6 +8,7 @@ from app.models.conversation import Conversation, ProposedAction
 from app.models.customer import Customer, PaymentCommitment
 from app.models.invoice import Invoice, InvoiceItem, Payment
 from app.models.payment_attempt import PaymentAttempt
+from app.models.rate_limit import RateLimitBucket
 
 __all__ = [
     "AuditLog",
@@ -23,6 +24,7 @@ __all__ = [
     "PaymentAttempt",
     "PaymentCommitment",
     "ProposedAction",
+    "RateLimitBucket",
     "RefreshToken",
     "User",
 ]
