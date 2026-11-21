@@ -19,6 +19,7 @@ import Link from "next/link";
 import { insightHref } from "@/components/layout/app-shell";
 import { useSession } from "@/components/providers";
 import { Money, PAYMENT_METHOD_LABEL } from "@/components/ui/finance";
+import { PendingPaymentsAlert } from "@/components/payments/pending-payments";
 import { Badge, Card, CardHeader, EmptyState, ErrorState, LoadingBlock, Notice, PageHeader, Skeleton, Stat } from "@/components/ui/primitives";
 import { useDashboard, useForecast } from "@/lib/api/hooks";
 import { formatDate, formatDateTime, humanize, relativeTime } from "@/lib/format/dates";
@@ -67,6 +68,8 @@ export function DashboardView() {
 
       {d && (
         <div className="space-y-6">
+          {/* Unconfirmed payments from the server registry (any device); each links to where it can be retried. */}
+          <PendingPaymentsAlert />
           {/* Assistant proposals only link to /actions from here; approval happens there and nothing is recorded until then. */}
           {d.pending_action_count > 0 && (
             <Notice tone="warn" title={`${d.pending_action_count} proposal(s) waiting for approval`}>

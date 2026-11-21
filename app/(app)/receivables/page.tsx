@@ -14,6 +14,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { ReminderDialog } from "@/components/customers/reminder-dialog";
+import { PendingPaymentBadge, usePendingIds } from "@/components/payments/pending-payments";
 import { AGEING_LABEL, DataTable, Money, PaymentStatusBadge, td, tdNum, th, thNum } from "@/components/ui/finance";
 import { Field, Input, Select } from "@/components/ui/form";
 import { Pager } from "@/components/ui/pager";
@@ -29,6 +30,8 @@ type Query = NonNullable<paths["/api/v1/receivables"]["get"]["parameters"]["quer
 
 /** Client page holding all filter state locally; every change produces a new receivables query. */
 export default function ReceivablesPage() {
+  // Invoices with an unconfirmed payment (server registry), flagged beside their status.
+  const pendingInvoices = usePendingIds("invoice");
   const summary = useReceivablesSummary();
   const [search, setSearch] = useState("");
   // "" means "no filter" and is converted to undefined below so the parameter is omitted from the request.
@@ -194,7 +197,10 @@ export default function ReceivablesPage() {
                   <tr key={r.id}>
                     <td className={td}>
                       <Link href={`/invoices/${r.id}`} className="font-semibold hover:underline">{r.invoice_number}</Link>
-                      <span className="mt-1 block"><PaymentStatusBadge status={r.payment_status} overdue={r.is_overdue} daysOverdue={r.days_overdue} /></span>
+                      <span className="mt-1 block">
+                        <PaymentStatusBadge status={r.payment_status} overdue={r.is_overdue} daysOverdue={r.days_overdue} />
+                        {pendingInvoices.has(r.id) && <Link href={`/invoices/${r.id}`} className="ml-1 inline-block"><PendingPaymentBadge /></Link>}
+                      </span>
                     </td>
                     <td className={td}><Link href={`/customers/${r.customer_id}`} className="hover:underline">{r.customer_name}</Link></td>
                     <td className={td}>

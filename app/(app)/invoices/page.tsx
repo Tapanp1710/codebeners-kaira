@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { SectionTabs } from "@/components/customers/section-tabs";
+import { PendingPaymentBadge, usePendingIds } from "@/components/payments/pending-payments";
 import { DataTable, Money, PaymentStatusBadge, td, tdNum, th, thNum } from "@/components/ui/finance";
 import { Field, Input, Select } from "@/components/ui/form";
 import { Pager } from "@/components/ui/pager";
@@ -24,6 +25,7 @@ type Status = "" | "open" | "unpaid" | "partially_paid" | "paid" | "overdue" | "
 
 /** Client page: filters are local state and become query parameters; empty values are omitted. */
 export default function InvoicesPage() {
+  const pendingInvoices = usePendingIds("invoice");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<Status>("");
   // YYYY-MM-DD strings straight from the date inputs, applied to the invoice date (not the due date).
@@ -113,7 +115,11 @@ export default function InvoicesPage() {
                     <td className={tdNum}><Money value={i.paid} /></td>
                     <td className={tdNum}><Money value={i.outstanding} className="font-semibold" /></td>
                     {/* Combines payment_status with the backend's is_overdue / days_overdue flags; overdue is never computed from dates in the browser. */}
-                    <td className={td}><PaymentStatusBadge status={i.payment_status} overdue={i.is_overdue} daysOverdue={i.days_overdue} /></td>
+                    <td className={td}>
+                      <PaymentStatusBadge status={i.payment_status} overdue={i.is_overdue} daysOverdue={i.days_overdue} />
+                      {/* A payment on this invoice is unconfirmed (server registry); it is resolved on the invoice page. */}
+                      {pendingInvoices.has(i.id) && <Link href={`/invoices/${i.id}`} className="ml-1 inline-block"><PendingPaymentBadge /></Link>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
