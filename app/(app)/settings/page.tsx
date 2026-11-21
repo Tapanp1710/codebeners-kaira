@@ -68,8 +68,10 @@ function SettingsForm({ business }: { business: Schemas["BusinessOut"] }) {
   return (
     <form onSubmit={onSubmit} className="space-y-5" noValidate>
       <div className="grid gap-4 sm:grid-cols-2">
+        {/* Where a Field has a hint, its id is passed back as `d` and set as aria-describedby, so screen readers read the hint with the input. */}
         <Field label="Business name">{(id) => <Input id={id} value={name} onChange={(e) => setName(e.target.value)} />}</Field>
         <Field label="Business type">{(id) => <Input id={id} value={type} onChange={(e) => setType(e.target.value)} />}</Field>
+        {/* inputMode="decimal" brings up a numeric keypad while keeping the value a string, matching the API's decimal strings. */}
         <Field label="Opening cash (₹)" hint="Cash held at the start of the opening date">
           {(id, d) => <Input id={id} aria-describedby={d} inputMode="decimal" value={opening} onChange={(e) => setOpening(e.target.value)} />}
         </Field>
@@ -83,7 +85,9 @@ function SettingsForm({ business }: { business: Schemas["BusinessOut"] }) {
           {(id, d) => <Input id={id} aria-describedby={d} inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} />}
         </Field>
       </div>
+      {/* Read-only context: currency and timezone are not part of the PATCH body. */}
       <p className="text-xs text-muted">Currency {business.currency} · timezone {business.timezone}</p>
+      {/* One message slot for both client validation and backend errors (describeError); cleared at the start of each submit. */}
       <FormError message={error} />
       <Button type="submit" loading={update.isPending}>Save settings</Button>
     </form>

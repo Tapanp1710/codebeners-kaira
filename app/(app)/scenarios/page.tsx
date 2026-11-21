@@ -65,13 +65,6 @@ export default function ScenariosPage() {
   // selected invoice (see its onChange), so an invoice from another customer cannot be submitted.
   const canRun = delayValid && (target === "largest" || (target === "customer" && customerId) || (target === "invoice" && invoiceId));
 
-  // Rendering notes:
-  // - Editing the form after a run does not clear the result. The result banner therefore uses the server's
-  //   echoed target_label and delay_days rather than the current form values.
-  // - Request errors are shown under the form through describeError(); the button shows a spinner meanwhile.
-  // - The sign of a difference is read from the decimal string's leading "-", never by parsing to a number.
-  // - Simulated values use the dedicated "sim" colour so they never look like actual or projected figures.
-  // - Picker labels show the raw decimal `outstanding` string rather than formatted money.
   return (
     <>
       <PageHeader title="What-If Analysis" subtitle="Test a delayed payment against your projected cash. Simulations never change your records." />
@@ -79,6 +72,7 @@ export default function ScenariosPage() {
         <Card className="h-fit">
           <CardHeader title="Scenario" subtitle="“What if my major customer pays 15 days late?”" />
           <form onSubmit={onRun} className="space-y-4" noValidate>
+            {/* noValidate: the 1–365 delay range is enforced by delayValid and shown through Field's error (linked via aria-describedby), not by browser popups. */}
             <fieldset className="space-y-2">
               <legend className="text-xs font-semibold uppercase tracking-wide text-muted">Who pays late</legend>
               {([
@@ -91,6 +85,7 @@ export default function ScenariosPage() {
                 </label>
               ))}
             </fieldset>
+            {/* Picker labels show the raw decimal `outstanding` string, not formatted money; while GET /customers loads the list is just empty. */}
             {target !== "largest" && (
               <Field label="Customer">
                 {(id) => (
@@ -138,11 +133,13 @@ export default function ScenariosPage() {
                 </Button>
               )}
             </div>
+            {/* POST /cashflow/simulate failures, via describeError(); the next run or "Back to baseline" clears it. */}
             <FormError message={sim.error ? describeError(sim.error) : null} />
           </form>
         </Card>
 
         <div className="space-y-6">
+          {/* Three states: a prompt before any run, a skeleton while the request is pending, then the last result (kept after form edits until reset). */}
           {!result && !sim.isPending && (
             <Card>
               <p className="font-display text-lg font-semibold">No scenario running</p>
@@ -152,10 +149,12 @@ export default function ScenariosPage() {
           {sim.isPending && <Skeleton className="h-96 w-full" />}
           {result && (
             <div className="space-y-6" data-testid="simulation-result">
+              {/* Uses the server's echoed target_label and delay_days, not the form values, because the form may have been edited since the run. */}
               <Notice tone="sim" title="Hypothetical scenario">
                 If <strong>{result.target_label}</strong> pays <strong>{result.delay_days} days late</strong>. No invoices, promises, payments or balances were changed.
               </Notice>
               <div className="grid gap-4 sm:grid-cols-3">
+                {/* The sign of the difference is read from the decimal string's leading "-", never by parsing it to a number. */}
                 <Stat label="Lowest - baseline" value={<Money value={result.baseline_lowest_balance} />} hint={formatDate(result.baseline_lowest_balance_date)} />
                 <Stat label="Lowest - simulated" tone={result.simulated_shortfalls.length ? "danger" : undefined} value={<Money value={result.simulated_lowest_balance} />} hint={formatDate(result.simulated_lowest_balance_date)} />
                 <Stat label="Difference" tone={result.lowest_balance_difference.startsWith("-") ? "danger" : "good"} value={<Money value={result.lowest_balance_difference} signed />} hint="Simulated minus baseline" />
@@ -163,6 +162,7 @@ export default function ScenariosPage() {
               <Card>
                 <CardHeader title="Impact" subtitle={<><Badge tone="info">Baseline = projected</Badge> <Badge tone="sim">Simulated = hypothetical</Badge></>} />
                 <p className="mb-4 text-sm leading-relaxed" data-testid="simulation-explanation">{result.explanation}</p>
+                {/* The first and last entries are shown as the range, relying on the backend returning new_shortfall_dates in date order. */}
                 {result.new_shortfall_dates.length > 0 && (
                   <Notice tone="danger" title="New cash shortfall">
                     Cash would fall below your threshold on {result.new_shortfall_dates.length} day(s), from {formatDate(result.new_shortfall_dates[0])} to{" "}
@@ -187,6 +187,7 @@ export default function ScenariosPage() {
                   <tbody data-testid="simulation-comparison">
                     {result.comparison.map((c) => (
                       <tr key={c.days}>
+                        {/* Simulated figures use the dedicated "sim" colour so they never read as actual or projected values. */}
                         <td className={td}>{c.days} days · {formatDate(c.date)}</td>
                         <td className={tdNum}><Money value={c.baseline_balance} /></td>
                         <td className={tdNum}><Money value={c.simulated_balance} className="text-sim" /></td>
@@ -197,6 +198,7 @@ export default function ScenariosPage() {
                 </DataTable>
                 <h3 className="mt-5 mb-2 text-sm font-semibold">Payments moved</h3>
                 <ul className="space-y-1 text-sm">
+                  {/* Index keys: shifted inflows carry no id and the whole list is replaced with each new result. */}
                   {result.shifted_inflows.map((s, i) => (
                     <li key={i}>
                       {s.label}: <Money value={s.amount} className="font-semibold" /> from {formatDate(s.baseline_date)} → <span className="text-sim">{formatDate(s.simulated_date)}</span>

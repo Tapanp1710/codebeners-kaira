@@ -44,8 +44,6 @@ export default function InvoicesPage() {
   // Every filter change returns to page 1 so the page number cannot point past the new result set.
   const reset = () => setPage(1);
 
-  // Error (retry), first-load and empty states come from the query. The status badge combines payment_status
-  // with the backend's is_overdue / days_overdue flags.
   return (
     <>
       <PageHeader
@@ -53,9 +51,11 @@ export default function InvoicesPage() {
         subtitle="Every invoice, with balances calculated by KAIRA"
         actions={<LinkButton href="/invoices/new" variant="primary"><Plus className="size-4" aria-hidden="true" /> New invoice</LinkButton>}
       />
+      {/* Tabs shared with /customers; "Invoices" is highlighted here and on /invoices/{id}. */}
       <SectionTabs />
       <Card>
         <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr_1fr]">
+          {/* Field generates the id that ties each visible label to its control. Every filter handler calls reset() so the page stays in range. */}
           <Field label="Search">
             {(id) => (
               <div className="relative">
@@ -77,10 +77,12 @@ export default function InvoicesPage() {
               </Select>
             )}
           </Field>
+          {/* Date inputs give YYYY-MM-DD (or "" when cleared), sent unchanged; there is no client check that "from" is before "to", the backend decides. */}
           <Field label="Invoice date from">{(id) => <Input id={id} type="date" value={from} onChange={(e) => { setFrom(e.target.value); reset(); }} />}</Field>
           <Field label="Invoice date to">{(id) => <Input id={id} type="date" value={to} onChange={(e) => { setTo(e.target.value); reset(); }} />}</Field>
         </div>
 
+        {/* Error (with retry), first-load and empty states come from the query; with no placeholderData, a new filter or page shows the loading block until it arrives. */}
         {invoices.isError && <ErrorState error={invoices.error} onRetry={() => invoices.refetch()} />}
         {invoices.isPending && <LoadingBlock label="Loading invoices" />}
         {data && data.items.length === 0 && <EmptyState title="No invoices match these filters" />}
@@ -102,6 +104,7 @@ export default function InvoicesPage() {
               <tbody data-testid="invoice-rows">
                 {data.items.map((i) => (
                   <tr key={i.id} className="hover:bg-cream/60">
+                    {/* Rows are not clickable here (unlike the customer list); the invoice number and customer name are separate links. */}
                     <td className={td}><Link href={`/invoices/${i.id}`} className="font-semibold hover:underline">{i.invoice_number}</Link></td>
                     <td className={td}><Link href={`/customers/${i.customer_id}`} className="hover:underline">{i.customer_name}</Link></td>
                     <td className={td}>{formatDate(i.invoice_date)}</td>
@@ -109,11 +112,13 @@ export default function InvoicesPage() {
                     <td className={tdNum}><Money value={i.total} /></td>
                     <td className={tdNum}><Money value={i.paid} /></td>
                     <td className={tdNum}><Money value={i.outstanding} className="font-semibold" /></td>
+                    {/* Combines payment_status with the backend's is_overdue / days_overdue flags; overdue is never computed from dates in the browser. */}
                     <td className={td}><PaymentStatusBadge status={i.payment_status} overdue={i.is_overdue} daysOverdue={i.days_overdue} /></td>
                   </tr>
                 ))}
               </tbody>
             </DataTable>
+            {/* total and page_size come from the response, so the page count follows what the backend actually applied. */}
             <Pager page={page} total={data.total} pageSize={data.page_size} onPage={setPage} />
           </>
         )}

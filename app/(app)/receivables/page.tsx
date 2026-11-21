@@ -55,19 +55,15 @@ export default function ReceivablesPage() {
   });
   const s = summary.data;
 
-  // Rendering notes:
-  // - The summary section is simply absent until loaded (no skeleton) and shows its own error; the invoice list
-  //   below loads and fails independently.
-  // - Ageing buckets in the summary card toggle the same `ageing` filter as the dropdown.
-  // - "Overdue" emphasis compares the API's decimal strings with "0.00"; no float conversion is involved.
-  // - Each open invoice lists its promises (amount + expected date) next to, not subtracted from, the balance.
   return (
     <>
       <PageHeader title="Receivables" subtitle="Money customers owe you - received payments and promises are shown separately" />
+      {/* Summary section (GET /receivables/summary): absent until loaded (no skeleton), with its own error and retry; the invoice list below loads and fails independently. */}
       {summary.isError && <ErrorState error={summary.error} onRetry={() => summary.refetch()} />}
       {s && (
         <>
           <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4" data-testid="receivables-summary">
+            {/* "Overdue" emphasis compares the API's 2-decimal string with "0.00"; no float conversion is involved. */}
             <Stat label="Total owed to you" value={<Money value={s.total_outstanding} />} hint={`${s.open_invoice_count} open invoices`} />
             <Stat label="Overdue" tone={s.total_overdue !== "0.00" ? "danger" : undefined} value={<Money value={s.total_overdue} />} hint={`${s.overdue_invoice_count} overdue`} />
             <Stat label="Not yet due" value={<Money value={s.total_current} />} hint={`${s.unpaid_invoice_count} unpaid · ${s.partially_paid_invoice_count} part-paid`} />
@@ -77,6 +73,7 @@ export default function ReceivablesPage() {
           <div className="mb-6 grid gap-6 xl:grid-cols-[1fr_2fr]">
             <Card aria-labelledby="age-title">
               <CardHeader id="age-title" title="Ageing" subtitle="Outstanding by days overdue" />
+              {/* Each bucket toggles the same `ageing` filter as the dropdown below (click the active one to clear it); aria-pressed exposes the toggle state. */}
               <ul className="space-y-2">
                 {(Object.keys(AGEING_LABEL) as NonNullable<Query["ageing"]>[]).map((k) => (
                   <li key={k}>
@@ -107,6 +104,7 @@ export default function ReceivablesPage() {
                   <tbody data-testid="receivables-customers">
                     {s.customers.map((c) => (
                       <tr key={c.customer_id} className={customerId === c.customer_id ? "bg-cream" : ""}>
+                        {/* The name button filters the invoice list to this customer (row highlighted while active); the link below it opens the customer page instead. */}
                         <td className={td}>
                           <button type="button" className="text-left font-semibold hover:underline" onClick={() => { setCustomerId(customerId === c.customer_id ? "" : c.customer_id); setPage(1); }} aria-pressed={customerId === c.customer_id}>
                             {c.customer_name}
@@ -127,6 +125,7 @@ export default function ReceivablesPage() {
         </>
       )}
 
+      {/* Open-invoice list (GET /receivables, 25 per page), driven by the filters below and the customer picked in "By customer". */}
       <Card aria-labelledby="ri-title">
         <CardHeader id="ri-title" title="Open invoices" subtitle={customerId ? "Filtered to one customer" : "All customers"} />
         <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -171,6 +170,7 @@ export default function ReceivablesPage() {
             )}
           </Field>
         </div>
+        {/* No placeholderData: each filter/page combination is a new query key, so the table gives way to the loading block until that page arrives. */}
         {rows.isError && <ErrorState error={rows.error} onRetry={() => rows.refetch()} />}
         {rows.isPending && <LoadingBlock label="Loading receivables" />}
         {rows.data && rows.data.items.length === 0 && <EmptyState title="No open invoices match" />}
@@ -205,6 +205,7 @@ export default function ReceivablesPage() {
                     <td className={tdNum}><Money value={r.paid} className="text-good" /></td>
                     <td className={tdNum}><Money value={r.outstanding} className="font-semibold" /></td>
                     <td className={td}>
+                      {/* Promises are listed next to the balance, never subtracted from it: a promise is expected money, not money received. */}
                       {r.commitments.length === 0 ? (
                         <span className="text-xs text-muted">No promise</span>
                       ) : (
@@ -216,6 +217,7 @@ export default function ReceivablesPage() {
                       )}
                     </td>
                     <td className={td}>
+                      {/* Icon-only button, so aria-label names both customer and invoice; the reminder is scoped to this invoice. */}
                       <button type="button" className="rounded-full p-1.5 text-steel hover:bg-navy/5" aria-label={`Draft reminder for ${r.customer_name}, ${r.invoice_number}`} onClick={() => setRemind({ customer: r.customer_id, invoice: r.id })}>
                         <BellRing className="size-4" aria-hidden="true" />
                       </button>
@@ -228,6 +230,7 @@ export default function ReceivablesPage() {
           </>
         )}
       </Card>
+      {/* Mounted only while a target is set, so language, tone and any previous draft start fresh for each reminder. */}
       {remind && <ReminderDialog open onClose={() => setRemind(null)} customerId={remind.customer} invoiceId={remind.invoice} />}
     </>
   );

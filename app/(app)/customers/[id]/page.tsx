@@ -42,14 +42,6 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   // Only pending promises are listed; fulfilled, cancelled and broken ones are just counted below the list.
   const upcoming = c.commitments.filter((x) => x.status === "pending");
 
-  // Rendering notes:
-  // - "Draft reminder" is disabled when nothing is outstanding.
-  // - "New invoice" links to /invoices/new?customer={id}, which InvoiceForm uses to preselect the customer.
-  // - The invoices section shows errors but no loading state; the payments and activity sections show neither,
-  //   they stay empty until data arrives.
-  // - Payments created by approving an assistant proposal carry source_action_id and are marked "via assistant".
-  // - Activity entries humanise audit action types (first "." replaced, e.g. "customer.updated").
-  // - Saving the edit dialog writes the response into this customer's cache entry and refreshes the list.
   return (
     <>
       <Link href="/customers" className="mb-3 inline-flex items-center gap-1 text-sm font-semibold text-steel">
@@ -61,9 +53,11 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         actions={
           <>
             <Button variant="secondary" onClick={() => setEditing(true)}><Pencil className="size-4" aria-hidden="true" /> Edit</Button>
+            {/* Disabled when nothing is outstanding (exact string comparison with the API's "0.00"). */}
             <Button variant="secondary" onClick={() => setReminder(true)} disabled={c.outstanding === "0.00"}>
               <BellRing className="size-4" aria-hidden="true" /> Draft reminder
             </Button>
+            {/* The ?customer={id} query lets InvoiceForm on /invoices/new preselect this customer. */}
             <LinkButton href={`/invoices/new?customer=${c.id}`} variant="primary"><FilePlus2 className="size-4" aria-hidden="true" /> New invoice</LinkButton>
           </>
         }
@@ -71,6 +65,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
       {c.notes && <p className="-mt-3 mb-6 text-sm text-muted">{c.notes}</p>}
 
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4" data-testid="customer-stats">
+        {/* All four totals are computed by the backend for this customer; nothing is summed from the lists below (which are capped at 200 rows). */}
         <Stat label="Outstanding" value={<Money value={c.outstanding} />} hint={`${c.open_invoice_count} open invoice(s)`} />
         <Stat label="Overdue" tone={c.overdue !== "0.00" ? "danger" : undefined} value={<Money value={c.overdue} />} hint={`${c.overdue_invoice_count} overdue invoice(s)`} />
         <Stat label="Total invoiced" value={<Money value={c.total_invoiced} />} />
@@ -81,6 +76,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         <div className="space-y-6">
           <Card aria-labelledby="inv-title">
             <CardHeader id="inv-title" title="Invoices" />
+            {/* Shows errors (without a retry button) but no loading state; the section stays blank until the invoices query resolves. */}
             {invoices.isError && <ErrorState error={invoices.error} />}
             {invoices.data && invoices.data.items.length === 0 && <EmptyState title="No invoices yet" />}
             {invoices.data && invoices.data.items.length > 0 && (
@@ -113,6 +109,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
 
           <Card aria-labelledby="pay-title">
             <CardHeader id="pay-title" title="Payment history" subtitle="Money actually received" />
+            {/* No loading or error UI here: a failed or pending payments query simply leaves the section empty. */}
             {payments.data && payments.data.items.length === 0 && <EmptyState title="No payments recorded" />}
             {payments.data && payments.data.items.length > 0 && (
               <DataTable caption={`Payments from ${c.name}`}>
@@ -129,6 +126,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                     <tr key={p.id}>
                       <td className={td}>{formatDate(p.payment_date)}</td>
                       <td className={td}><Link href={`/invoices/${p.invoice_id}`} className="hover:underline">{p.invoice_number}</Link></td>
+                      {/* Unknown method codes fall back to the raw code; payments recorded by approving an assistant proposal carry source_action_id and are tagged "via assistant". */}
                       <td className={td}>{PAYMENT_METHOD_LABEL[p.payment_method] ?? p.payment_method}{p.source_action_id ? " · via assistant" : ""}</td>
                       <td className={tdNum}><Money value={p.amount} className="font-semibold text-good" /></td>
                     </tr>
@@ -166,10 +164,12 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
           </Card>
           <Card aria-labelledby="hist-title">
             <CardHeader id="hist-title" title="Activity" />
+            {/* Latest 10 audit-log entries for this customer only; like payments, no loading or error UI. */}
             {activity.data && activity.data.items.length === 0 && <EmptyState title="No activity" />}
             <ol className="space-y-2">
               {activity.data?.items.map((a) => (
                 <li key={a.id} className="text-sm">
+                  {/* Action type humanised with only the first "." replaced (e.g. "customer.updated"); the UTC timestamp is shown in Asia/Kolkata time. */}
                   <span className="font-semibold">{humanize(a.action_type.replace(".", " "))}</span>
                   <span className="block text-xs text-muted">{formatDateTime(a.created_at)}</span>
                 </li>
@@ -179,7 +179,9 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         </div>
       </div>
 
+      {/* Edit mode (customer prop set): saving PATCHes, writes the response into this customer's cache entry and refreshes the customer lists. */}
       <CustomerFormDialog open={editing} onClose={() => setEditing(false)} customer={c} />
+      {/* Always mounted (unlike on Receivables), so language, tone and the last draft persist between openings; no invoiceId, so it covers the whole balance. */}
       <ReminderDialog open={reminder} onClose={() => setReminder(false)} customerId={c.id} />
     </>
   );

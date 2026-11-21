@@ -52,13 +52,6 @@ export default function CashflowPage() {
   const forecast = useForecast(horizon, granularity);
   const f = forecast.data;
 
-  // Rendering notes:
-  // - Error (retry) and first-load states come from the query; the body renders only once `f` exists.
-  // - "Lowest projected" turns red when the backend reports shortfall periods below the safety threshold.
-  // - Warnings and assumptions are backend-written text shown verbatim; events use index keys because they
-  //   carry no id and the whole list is replaced on every fetch.
-  // - Movements outside the horizon are summarised only when non-zero; the check compares against the API's
-  //   2-decimal string "0.00".
   return (
     <>
       <PageHeader
@@ -66,6 +59,7 @@ export default function CashflowPage() {
         subtitle="Projected from what you are owed and what you owe - a planning estimate, not a guarantee"
         actions={
           <div className="flex gap-2">
+            {/* Visually hidden label text names each select for screen readers; a new horizon/granularity pair is a separate cached query, so switching back is instant while fresh. */}
             <label>
               <span className="sr-only">Horizon</span>
               <Select value={horizon} onChange={(e) => setHorizon(Number(e.target.value))}>
@@ -85,11 +79,13 @@ export default function CashflowPage() {
           </div>
         }
       />
+      {/* Error (with retry) and first-load states come from the forecast query; the body renders only once `f` exists. */}
       {forecast.isError && <ErrorState error={forecast.error} onRetry={() => forecast.refetch()} />}
       {forecast.isPending && <LoadingBlock rows={5} label="Loading forecast" />}
       {f && (
         <div className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" data-testid="forecast-stats">
+            {/* "Lowest projected" turns red when the backend reports any shortfall period below the safety threshold. */}
             <Stat label="Current cash (actual)" value={<Money value={f.current_cash} />} hint={<>Opening <Money value={f.opening_cash} /></>} />
             <Stat label={`Expected in · ${horizon}d`} tone="good" value={<Money value={f.expected_inflows} />} hint="From invoices and promises" />
             <Stat label={`Expected out · ${horizon}d`} tone="warn" value={<Money value={f.expected_outflows} />} hint="Unpaid bills" />
@@ -106,6 +102,7 @@ export default function CashflowPage() {
                 </div>
               ))}
             </dl>
+            {/* Warnings are backend-written text shown verbatim; index keys are safe because the list is replaced on every fetch. */}
             {f.warnings.length > 0 && (
               <div className="mb-4 space-y-2">
                 {f.warnings.map((w, i) => (
@@ -129,13 +126,16 @@ export default function CashflowPage() {
                 </tr>
               </thead>
               <tbody data-testid="forecast-events">
+                {/* Events carry no id, so rows use index keys; the whole list is replaced on every fetch. */}
                 {f.events.map((e, i) => (
                   <tr key={i}>
                     <td className={td}>
+                      {/* For movements moved by an assumption (overdue invoice, missed promise), the original date is shown under the projected one. */}
                       {formatDate(e.date)}
                       {e.original_date && e.original_date !== e.date && <span className="block text-xs text-muted">originally {formatDate(e.original_date)}</span>}
                     </td>
                     <td className={td}>
+                      {/* Only movements with an invoice_id link to the invoice; others (e.g. bills) are plain labels. */}
                       {e.invoice_id ? <Link href={`/invoices/${e.invoice_id}`} className="hover:underline">{e.label}</Link> : e.label}
                     </td>
                     <td className={td}><Badge tone={EVENT_LABEL[e.kind].tone}>{EVENT_LABEL[e.kind].label}</Badge></td>
@@ -145,6 +145,7 @@ export default function CashflowPage() {
                 ))}
               </tbody>
             </DataTable>
+            {/* Movements beyond the horizon are summarised only when non-zero; the check compares against the API's 2-decimal string "0.00". */}
             {(f.beyond_horizon_inflows !== "0.00" || f.beyond_horizon_outflows !== "0.00") && (
               <p className="mt-3 text-xs text-muted">
                 Beyond this period: <Money value={f.beyond_horizon_inflows} /> expected in, <Money value={f.beyond_horizon_outflows} /> expected out.
@@ -152,6 +153,7 @@ export default function CashflowPage() {
             )}
           </Card>
 
+          {/* BillsPanel runs its own GET /bills query with its own loading/error states and does not depend on the selected horizon; its writes invalidate this forecast. */}
           <BillsPanel />
 
           <Card aria-labelledby="as-title">
@@ -161,6 +163,7 @@ export default function CashflowPage() {
                 <li key={i}>{a}</li>
               ))}
             </ul>
+            {/* Owner-only hint: /settings is restricted to owners, so staff are not shown a link they cannot use. */}
             {isOwner && (
               <p className="mt-3 text-sm">
                 The overdue collection delay and safety threshold are configurable in <Link href="/settings" className="font-semibold text-steel underline">business settings</Link>.

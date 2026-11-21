@@ -44,13 +44,6 @@ export default function CustomersPage() {
   });
   const data = customers.data;
 
-  // Rendering notes:
-  // - The empty state checks the debounced query, so its message matches the search actually sent.
-  // - Whole rows navigate via router.push; the name Link stops propagation so a click does not navigate twice.
-  // - Status badge priority: Overdue > Owes > Settled, from string comparisons with "0.00"; "Promised" is
-  //   added when pending commitments exist.
-  // - "Since" takes the date part of the UTC created_at timestamp.
-  // - Changing the sort keeps the current page; search and balance filter reset it.
   return (
     <>
       <PageHeader
@@ -64,6 +57,7 @@ export default function CustomersPage() {
       />
       <SectionTabs />
       <Card>
+        {/* Filter bar: each control is wrapped in a <label> whose sr-only text gives it an accessible name without a visible label. */}
         <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_auto_auto]">
           <label className="relative">
             <span className="sr-only">Search customers</span>
@@ -78,6 +72,7 @@ export default function CustomersPage() {
               <option value="false">Settled</option>
             </Select>
           </label>
+          {/* Changing the sort keeps the current page; search and the balance filter reset it to 1. */}
           <label>
             <span className="sr-only">Sort</span>
             <Select value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
@@ -89,8 +84,10 @@ export default function CustomersPage() {
           </label>
         </div>
 
+        {/* No placeholderData: each filter/sort/page combination is a new query key, so the table gives way to the loading block while it loads. */}
         {customers.isError && <ErrorState error={customers.error} onRetry={() => customers.refetch()} />}
         {customers.isPending && <LoadingBlock label="Loading customers" />}
+        {/* Uses the debounced query, so the message matches the search actually sent; the "add first customer" action appears only without a search. */}
         {data && data.items.length === 0 && (
           <EmptyState title={q ? "No customers match your search" : "No customers yet"} action={!q && <Button onClick={() => setCreating(true)}>Add your first customer</Button>} />
         )}
@@ -110,6 +107,7 @@ export default function CustomersPage() {
               <tbody data-testid="customer-rows">
                 {data.items.map((c) => (
                   <tr key={c.id} className="cursor-pointer hover:bg-cream/60" onClick={() => router.push(`/customers/${c.id}`)}>
+                    {/* The row click is a mouse convenience; the name Link is the keyboard/screen-reader path and stops propagation so one click does not navigate twice. */}
                     <td className={td}>
                       <Link href={`/customers/${c.id}`} className="font-semibold hover:underline" onClick={(e) => e.stopPropagation()}>{c.name}</Link>
                       <span className="block text-xs text-muted">{c.open_invoice_count} open invoice(s)</span>
@@ -121,6 +119,7 @@ export default function CustomersPage() {
                     <td className={tdNum}><Money value={c.outstanding} className="font-semibold" /></td>
                     <td className={tdNum}><Money value={c.overdue} className={c.overdue !== "0.00" ? "font-semibold text-danger" : "text-muted"} /></td>
                     <td className={td}>
+                      {/* Badge priority Overdue > Owes > Settled, from string comparisons with "0.00"; "Promised" is added when pending commitments exist. */}
                       {c.overdue !== "0.00" ? (
                         <Badge tone="danger">Overdue</Badge>
                       ) : c.outstanding !== "0.00" ? (
@@ -130,15 +129,18 @@ export default function CustomersPage() {
                       )}
                       {c.pending_commitments !== "0.00" && <Badge tone="info" className="ml-1">Promised</Badge>}
                     </td>
+                    {/* "Since" shows the date part of the UTC created_at timestamp as-is, without timezone conversion. */}
                     <td className={td}>{formatDate(c.created_at.slice(0, 10))}</td>
                   </tr>
                 ))}
               </tbody>
             </DataTable>
+            {/* total and page_size come from the response; with a single page Pager shows only the total count. */}
             <Pager page={page} total={data.total} pageSize={data.page_size} onPage={setPage} />
           </>
         )}
       </Card>
+      {/* Create mode (no customer prop): POST /customers invalidates only customer lists, then onSaved opens the new customer's page. */}
       <CustomerFormDialog open={creating} onClose={() => setCreating(false)} onSaved={(id) => router.push(`/customers/${id}`)} />
     </>
   );

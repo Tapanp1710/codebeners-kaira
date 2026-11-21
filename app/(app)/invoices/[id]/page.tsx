@@ -57,10 +57,6 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
     }
   }
 
-  // Rendering notes:
-  // - Line totals and the invoice total are the backend's values; nothing is recalculated in the browser.
-  // - The payment history has no loading or error state of its own; it stays empty until data arrives.
-  // - PaymentDialog is always mounted and toggled with `open`; it checks the amount against this invoice's outstanding.
   return (
     <>
       <Link href="/invoices" className="mb-3 inline-flex items-center gap-1 text-sm font-semibold text-steel">
@@ -75,16 +71,20 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
         }
         actions={
           <>
+            {/* Each action renders only when canVoid / canPay allow it; Void shows a spinner while its PATCH is pending. */}
             {canVoid && <Button variant="secondary" onClick={onVoid} loading={update.isPending}><Ban className="size-4" aria-hidden="true" /> Void</Button>}
             {canPay && <Button onClick={() => setPaying(true)} data-testid="record-payment"><IndianRupee className="size-4" aria-hidden="true" /> Record payment</Button>}
           </>
         }
       />
+      {/* Void failures land here (onVoid swallows them on purpose); the error stays until the next void attempt. */}
       <FormError message={update.error ? describeError(update.error) : null} />
       <div className="mb-6 flex flex-wrap items-center gap-2">
+        {/* Payment status plus a separate "Overdue" badge driven by the backend's is_overdue / days_overdue. */}
         <PaymentStatusBadge status={i.payment_status} overdue={i.is_overdue} daysOverdue={i.days_overdue} />
       </div>
       <div className="mb-6 grid gap-4 sm:grid-cols-3" data-testid="invoice-totals">
+        {/* Total, paid and outstanding are the backend's decimal strings; paid is derived server-side from recorded payments. */}
         <Stat label="Invoice total" value={<Money value={i.total} />} />
         <Stat label="Paid" tone="good" value={<Money value={i.paid} />} />
         <Stat label="Outstanding" tone={i.is_overdue ? "danger" : undefined} value={<Money value={i.outstanding} />} hint={i.is_overdue ? `${i.days_overdue} days overdue` : `Due ${formatDate(i.due_date)}`} />
@@ -111,6 +111,7 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
                   <td className={tdNum}><Money value={it.line_total} /></td>
                 </tr>
               ))}
+              {/* The total row repeats the backend's invoice total; line totals are never summed in the browser. */}
               <tr>
                 <td className={td} colSpan={3}><span className="font-semibold">Total</span></td>
                 <td className={tdNum}><Money value={i.total} className="font-semibold" /></td>
@@ -122,6 +123,7 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
 
         <Card aria-labelledby="ph-title">
           <CardHeader id="ph-title" title="Payment history" />
+          {/* First 200 payments; no loading or error state of its own, so the list stays empty until data arrives. */}
           {payments.data && payments.data.items.length === 0 && <EmptyState title="No payments yet" />}
           <ul className="divide-y divide-line" data-testid="invoice-payments">
             {payments.data?.items.map((p) => (
@@ -140,6 +142,7 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
           </ul>
         </Card>
       </div>
+      {/* Always mounted and toggled with `open`; it validates the amount against this invoice's outstanding and reuses one Idempotency-Key per submission. */}
       <PaymentDialog invoice={i} open={paying} onClose={() => setPaying(false)} />
     </>
   );
