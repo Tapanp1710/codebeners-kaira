@@ -1,5 +1,13 @@
 "use client";
 
+/**
+ * Invoice detail for /invoices/[id]. Reads GET /api/v1/invoices/{id} (items, totals, status) and
+ * GET /api/v1/invoices/{id}/payments (first 200). Two writes are offered:
+ * - Void: PATCH /api/v1/invoices/{id} with lifecycle_status "void".
+ * - Record payment: PaymentDialog, which POSTs /api/v1/invoices/{id}/payments with an Idempotency-Key created
+ *   once per submission so a retry cannot record the payment twice.
+ * Both writes invalidate every ledger-derived query (invoice, customer, receivables, forecast, dashboard...).
+ */
 import { ArrowLeft, Ban, IndianRupee } from "lucide-react";
 import Link from "next/link";
 import { use, useState } from "react";
@@ -13,21 +21,32 @@ import { describeError } from "@/lib/api/errors";
 import { useInvoice, useInvoicePayments, useUpdateInvoice } from "@/lib/api/hooks";
 import { formatDate } from "@/lib/format/dates";
 
+/** Client Component page; the route `params` Promise is unwrapped with React's use(). */
 export default function InvoiceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const invoice = useInvoice(id);
   const payments = useInvoicePayments(id);
+  // Used only for voiding. Its error is rendered under the header, so onVoid does not handle it itself.
   const update = useUpdateInvoice(id);
   const toast = useToast();
   const [paying, setPaying] = useState(false);
   const i = invoice.data;
 
+  // Early returns sit after all hooks. Not-found or forbidden invoices surface as an ApiError with retry.
   if (invoice.isError) return <ErrorState error={invoice.error} onRetry={() => invoice.refetch()} />;
   if (!i) return <LoadingBlock label="Loading invoice" rows={5} />;
 
+  // Payments only on issued (not void) invoices with something left to pay. Amounts are compared as the API's
+  // 2-decimal strings, never as floats.
   const canPay = i.lifecycle_status === "issued" && i.outstanding !== "0.00";
+  // Voiding is only offered while nothing has been paid, so no recorded payment is left on a void invoice.
   const canVoid = i.lifecycle_status === "issued" && i.paid === "0.00";
 
+  /**
+   * Asks for a browser confirmation, then PATCHes the lifecycle status. The non-null assertions are needed
+   * because TypeScript does not carry the `!i` early-return narrowing into this nested function. Failures are
+   * swallowed here on purpose: update.error is already displayed through FormError.
+   */
   async function onVoid() {
     if (!window.confirm(`Void ${i!.invoice_number}? It will no longer count as money owed.`)) return;
     try {
@@ -38,6 +57,10 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
     }
   }
 
+  // Rendering notes:
+  // - Line totals and the invoice total are the backend's values; nothing is recalculated in the browser.
+  // - The payment history has no loading or error state of its own; it stays empty until data arrives.
+  // - PaymentDialog is always mounted and toggled with `open`; it checks the amount against this invoice's outstanding.
   return (
     <>
       <Link href="/invoices" className="mb-3 inline-flex items-center gap-1 text-sm font-semibold text-steel">

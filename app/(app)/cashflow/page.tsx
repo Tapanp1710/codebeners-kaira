@@ -1,5 +1,12 @@
 "use client";
 
+/**
+ * Cash-flow forecast screen. Shows the backend's projection from GET /api/v1/cashflow/forecast
+ * (?horizon_days, ?granularity): current cash, expected inflows/outflows, lowest projected balance, milestone
+ * balances, shortfall warnings, the list of expected movements and the assumptions behind them. It also hosts
+ * BillsPanel (supplier bills and bill payments). Every figure is computed server-side; this page only formats
+ * decimal strings and never does financial arithmetic.
+ */
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useState } from "react";
@@ -13,27 +20,45 @@ import { useForecast } from "@/lib/api/hooks";
 import type { Forecast } from "@/lib/api/types";
 import { formatDate } from "@/lib/format/dates";
 
+// The Recharts chart is loaded on the client only (ssr: false) and split into its own chunk, with a skeleton of
+// the same height while it loads. The chart converts decimal strings to numbers for plotting geometry only.
 const ForecastChart = dynamic(() => import("@/components/charts/forecast-chart").then((m) => m.ForecastChart), {
   ssr: false,
   loading: () => <Skeleton className="h-80 w-full" />,
 });
 
+// Keyed by the API's event `kind` union, so type-checking fails if the contract adds a kind without a
+// label here. The labels make the forecast's assumptions visible next to each movement.
 const EVENT_LABEL: Record<Forecast["events"][number]["kind"], { label: string; tone: "good" | "warn" | "danger" | "info" | "neutral" }> = {
   invoice_due: { label: "Invoice due", tone: "good" },
   commitment: { label: "Promised by customer", tone: "info" },
+  // Overdue invoices without a promise are projected at today + the "overdue collection delay" setting instead
+  // of their past due date; missed promises are likewise moved later. The table shows the original date too.
   overdue_assumption: { label: "Overdue - assumed later", tone: "warn" },
   missed_commitment: { label: "Missed promise - assumed later", tone: "warn" },
   bill_due: { label: "Bill due", tone: "neutral" },
+  // Unpaid overdue bills are projected as leaving cash today rather than at their past due date.
   overdue_bill: { label: "Overdue bill - assumed today", tone: "danger" },
 };
 
+/** Client page: horizon (30–180 days) and daily/weekly granularity are local state that drive the query. */
 export default function CashflowPage() {
+  // Only used to show the link to /settings, which is an owner-only page.
   const { isOwner } = useSession();
   const [horizon, setHorizon] = useState(90);
   const [granularity, setGranularity] = useState<"daily" | "weekly">("daily");
+  // Query key is ["forecast", horizon, granularity], so each combination is cached on its own; the dashboard's
+  // 90-day weekly forecast shares the same cache entry. The key is also invalidated after any financial write.
   const forecast = useForecast(horizon, granularity);
   const f = forecast.data;
 
+  // Rendering notes:
+  // - Error (retry) and first-load states come from the query; the body renders only once `f` exists.
+  // - "Lowest projected" turns red when the backend reports shortfall periods below the safety threshold.
+  // - Warnings and assumptions are backend-written text shown verbatim; events use index keys because they
+  //   carry no id and the whole list is replaced on every fetch.
+  // - Movements outside the horizon are summarised only when non-zero; the check compares against the API's
+  //   2-decimal string "0.00".
   return (
     <>
       <PageHeader

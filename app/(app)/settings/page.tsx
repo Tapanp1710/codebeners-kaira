@@ -1,5 +1,10 @@
 "use client";
 
+/**
+ * Business settings (owner only). These four values feed the backend's cash position and forecast:
+ * opening cash balance + its as-of date, the overdue collection delay, and the low-cash (shortfall)
+ * threshold. Reads GET /api/v1/business/settings and saves with PATCH /api/v1/business/settings.
+ */
 import { useState, type FormEvent } from "react";
 
 import { useSession, useToast } from "@/components/providers";
@@ -10,6 +15,10 @@ import { useSettings, useUpdateSettings } from "@/lib/api/hooks";
 import type { Schemas } from "@/lib/api/types";
 import { isValidAmount } from "@/lib/format/money";
 
+/**
+ * Edit form, mounted only once settings have loaded, so the inputs are seeded from server data exactly once.
+ * Money fields stay decimal strings (as the API sends them) and are never converted to floating point.
+ */
 function SettingsForm({ business }: { business: Schemas["BusinessOut"] }) {
   const toast = useToast();
   const update = useUpdateSettings();
@@ -17,19 +26,31 @@ function SettingsForm({ business }: { business: Schemas["BusinessOut"] }) {
   const [type, setType] = useState(business.business_type ?? "");
   const [opening, setOpening] = useState(business.opening_cash_balance);
   const [openingDate, setOpeningDate] = useState(business.opening_cash_as_of);
+  // Kept as text for the number input; parsed and range-checked on submit.
   const [delay, setDelay] = useState(String(business.overdue_collection_delay_days));
   const [threshold, setThreshold] = useState(business.low_cash_threshold);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Lightweight client checks before the PATCH. The backend stays authoritative: its validation errors come back
+   * as ApiError and are shown inline via describeError. Mutations are never auto-retried (see Providers).
+   */
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     if (!name.trim()) return setError("Business name is required.");
+    // Up to 12 integer digits and 2 decimals; zero is allowed, a minus sign is not.
     if (!/^\d{1,12}(\.\d{1,2})?$/.test(opening)) return setError("Opening cash must be a non-negative amount.");
+    // isValidAmount() requires a positive value matching the same pattern, so in practice the regex alone
+    // decides here and a zero threshold is accepted.
     if (!/^\d{1,12}(\.\d{1,2})?$/.test(threshold) && !isValidAmount(threshold)) return setError("Threshold must be a non-negative amount.");
     const d = Number(delay);
+    // Same 0–365 range as the input's min/max; the input attributes alone are not enforced (form is noValidate).
     if (!Number.isInteger(d) || d < 0 || d > 365) return setError("Overdue collection delay must be 0–365 days.");
     try {
+      // An empty business type is sent as null to clear it. Currency and timezone are display-only here.
+      // On success useUpdateSettings writes the response into the settings cache and invalidates every
+      // ledger-derived query, because the forecast and dashboard depend on these values.
       await update.mutateAsync({
         name: name.trim(),
         business_type: type.trim() || null,
@@ -69,6 +90,11 @@ function SettingsForm({ business }: { business: Schemas["BusinessOut"] }) {
   );
 }
 
+/**
+ * Page wrapper. isOwner comes from the server-provided session (role === "owner"); staff see a notice instead
+ * of the form. useSettings() still runs for everyone because hooks cannot be called conditionally; only the
+ * rendering is gated. The backend independently rejects settings changes from non-owners (403).
+ */
 export default function SettingsPage() {
   const { isOwner } = useSession();
   const settings = useSettings();

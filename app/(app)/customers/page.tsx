@@ -1,5 +1,11 @@
 "use client";
 
+/**
+ * Customer list (first tab of "Customers & Invoices"; SectionTabs links to /invoices). Loads a paginated
+ * GET /api/v1/customers with search, balance filter and sort; balances (outstanding, overdue, promised) come
+ * precomputed from the backend. "New customer" opens CustomerFormDialog (POST /api/v1/customers, which
+ * invalidates the customers queries) and navigates to the new customer's page on save.
+ */
 import { Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -15,15 +21,19 @@ import { useDebounced } from "@/hooks/use-debounced";
 import { useCustomers } from "@/lib/api/hooks";
 import { formatDate } from "@/lib/format/dates";
 
+// Mirrors the backend's accepted `sort` values for /customers.
 type Sort = "name" | "outstanding" | "overdue" | "recent";
 
+/** Client page: filter/sort/page are local state; each combination is its own React Query cache entry. */
 export default function CustomersPage() {
   const router = useRouter();
   const [search, setSearch] = useState("");
+  // Tri-state select value: "" = all (param omitted), "true" = owes money, "false" = settled.
   const [balance, setBalance] = useState<"" | "true" | "false">("");
   const [sort, setSort] = useState<Sort>("name");
   const [page, setPage] = useState(1);
   const [creating, setCreating] = useState(false);
+  // 300 ms debounce before the search reaches the API; the page resets to 1 as soon as the text changes.
   const q = useDebounced(search);
   const customers = useCustomers({
     search: q || undefined,
@@ -34,6 +44,13 @@ export default function CustomersPage() {
   });
   const data = customers.data;
 
+  // Rendering notes:
+  // - The empty state checks the debounced query, so its message matches the search actually sent.
+  // - Whole rows navigate via router.push; the name Link stops propagation so a click does not navigate twice.
+  // - Status badge priority: Overdue > Owes > Settled, from string comparisons with "0.00"; "Promised" is
+  //   added when pending commitments exist.
+  // - "Since" takes the date part of the UTC created_at timestamp.
+  // - Changing the sort keeps the current page; search and balance filter reset it.
   return (
     <>
       <PageHeader

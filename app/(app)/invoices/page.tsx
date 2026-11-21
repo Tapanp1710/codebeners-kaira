@@ -1,5 +1,10 @@
 "use client";
 
+/**
+ * Invoice list (second tab of "Customers & Invoices"). Paginated GET /api/v1/invoices with search, status and
+ * invoice-date range filters, 25 per page. Paid/outstanding amounts are computed by the backend from recorded
+ * payments. New invoices are created on /invoices/new.
+ */
 import { Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
@@ -13,14 +18,19 @@ import { useDebounced } from "@/hooks/use-debounced";
 import { useInvoices } from "@/lib/api/hooks";
 import { formatDate } from "@/lib/format/dates";
 
+// Backend status filter values. "open" means still owed (unpaid or partially paid); "void" is the lifecycle
+// state of a voided invoice; "" sends no filter.
 type Status = "" | "open" | "unpaid" | "partially_paid" | "paid" | "overdue" | "void";
 
+/** Client page: filters are local state and become query parameters; empty values are omitted. */
 export default function InvoicesPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<Status>("");
+  // YYYY-MM-DD strings straight from the date inputs, applied to the invoice date (not the due date).
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [page, setPage] = useState(1);
+  // Search text is debounced (300 ms); the other filters apply immediately.
   const q = useDebounced(search);
   const invoices = useInvoices({
     search: q || undefined,
@@ -31,8 +41,11 @@ export default function InvoicesPage() {
     page_size: 25,
   });
   const data = invoices.data;
+  // Every filter change returns to page 1 so the page number cannot point past the new result set.
   const reset = () => setPage(1);
 
+  // Error (retry), first-load and empty states come from the query. The status badge combines payment_status
+  // with the backend's is_overdue / days_overdue flags.
   return (
     <>
       <PageHeader

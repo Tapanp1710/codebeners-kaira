@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * Receivables screen: money customers owe the business. Two independent queries feed it:
+ * - GET /api/v1/receivables/summary: whole-business totals, ageing buckets and per-customer balances. It is
+ *   NOT affected by the filters on this page.
+ * - GET /api/v1/receivables: the paginated, filterable list of open invoices (25 per page).
+ * Payments received and payment promises (commitments) are shown separately: a promise is expected money and
+ * never reduces the outstanding balance. The bell icon opens ReminderDialog, which drafts a reminder through
+ * POST /api/v1/assistant/reminder.
+ */
 import { BellRing, Search } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
@@ -14,18 +23,27 @@ import { useReceivables, useReceivablesSummary } from "@/lib/api/hooks";
 import type { paths } from "@/lib/api/types";
 import { formatDate } from "@/lib/format/dates";
 
+// Filter types come from the generated OpenAPI schema, so status/ageing/sort values stay in step with the
+// backend contract.
 type Query = NonNullable<paths["/api/v1/receivables"]["get"]["parameters"]["query"]>;
 
+/** Client page holding all filter state locally; every change produces a new receivables query. */
 export default function ReceivablesPage() {
   const summary = useReceivablesSummary();
   const [search, setSearch] = useState("");
+  // "" means "no filter" and is converted to undefined below so the parameter is omitted from the request.
   const [status, setStatus] = useState<Query["status"] | "">("");
   const [ageing, setAgeing] = useState<Query["ageing"] | "">("");
+  // A leading "-" means descending (backend convention); the default shows the most overdue invoices first.
   const [sort, setSort] = useState<NonNullable<Query["sort"]>>("-days_overdue");
+  // Set by clicking a name in the "By customer" table (click again to clear), not by a dropdown.
   const [customerId, setCustomerId] = useState("");
   const [page, setPage] = useState(1);
+  // Target of the reminder dialog; null = closed. The dialog is only mounted while set, so it starts fresh.
   const [remind, setRemind] = useState<{ customer: string; invoice?: string } | null>(null);
+  // 300 ms debounce: typing does not fire one request per keystroke. The page is reset to 1 immediately.
   const q = useDebounced(search);
+  // Every filter change except sort also resets the page to 1 in its handler; changing sort keeps the page.
   const rows = useReceivables({
     search: q || undefined,
     status: status || undefined,
@@ -37,6 +55,12 @@ export default function ReceivablesPage() {
   });
   const s = summary.data;
 
+  // Rendering notes:
+  // - The summary section is simply absent until loaded (no skeleton) and shows its own error; the invoice list
+  //   below loads and fails independently.
+  // - Ageing buckets in the summary card toggle the same `ageing` filter as the dropdown.
+  // - "Overdue" emphasis compares the API's decimal strings with "0.00"; no float conversion is involved.
+  // - Each open invoice lists its promises (amount + expected date) next to, not subtracted from, the balance.
   return (
     <>
       <PageHeader title="Receivables" subtitle="Money customers owe you - received payments and promises are shown separately" />

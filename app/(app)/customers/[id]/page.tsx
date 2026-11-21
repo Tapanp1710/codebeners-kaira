@@ -1,5 +1,13 @@
 "use client";
 
+/**
+ * Customer detail for the dynamic segment /customers/[id]. Issues four queries in parallel:
+ * - GET /api/v1/customers/{id}: profile, balance totals and the customer's payment commitments.
+ * - GET /api/v1/customers/{id}/invoices and /payments (first 200 each, no paging on this screen).
+ * - GET /api/v1/audit-logs?entity_type=customer&entity_id={id} (latest 10) for the activity feed.
+ * Actions: edit (CustomerFormDialog, PATCH), draft a reminder (ReminderDialog), or start a new invoice for
+ * this customer.
+ */
 import { ArrowLeft, BellRing, FilePlus2, Pencil } from "lucide-react";
 import Link from "next/link";
 import { use, useState } from "react";
@@ -11,8 +19,13 @@ import { Button, Card, CardHeader, EmptyState, ErrorState, LinkButton, LoadingBl
 import { useAuditLogs, useCustomer, useCustomerInvoices, useCustomerPayments } from "@/lib/api/hooks";
 import { formatDate, formatDateTime, humanize } from "@/lib/format/dates";
 
+/**
+ * Client Component page. In this Next.js version route `params` arrive as a Promise; a client page unwraps it
+ * with React's use() rather than await.
+ */
 export default function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  // Only the customer query gates the page; the other three render their own sections when they arrive.
   const customer = useCustomer(id);
   const invoices = useCustomerInvoices(id);
   const payments = useCustomerPayments(id);
@@ -21,11 +34,22 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   const [reminder, setReminder] = useState(false);
   const c = customer.data;
 
+  // Early returns come after every hook call (rules of hooks). A missing or forbidden customer surfaces here
+  // as an ApiError with a retry button.
   if (customer.isError) return <ErrorState error={customer.error} onRetry={() => customer.refetch()} />;
   if (!c) return <LoadingBlock label="Loading customer" rows={5} />;
 
+  // Only pending promises are listed; fulfilled, cancelled and broken ones are just counted below the list.
   const upcoming = c.commitments.filter((x) => x.status === "pending");
 
+  // Rendering notes:
+  // - "Draft reminder" is disabled when nothing is outstanding.
+  // - "New invoice" links to /invoices/new?customer={id}, which InvoiceForm uses to preselect the customer.
+  // - The invoices section shows errors but no loading state; the payments and activity sections show neither,
+  //   they stay empty until data arrives.
+  // - Payments created by approving an assistant proposal carry source_action_id and are marked "via assistant".
+  // - Activity entries humanise audit action types (first "." replaced, e.g. "customer.updated").
+  // - Saving the edit dialog writes the response into this customer's cache entry and refreshes the list.
   return (
     <>
       <Link href="/customers" className="mb-3 inline-flex items-center gap-1 text-sm font-semibold text-steel">

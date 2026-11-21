@@ -1,5 +1,11 @@
 "use client";
 
+/**
+ * What-if analysis: "what if this customer/invoice pays N days late?". Sends POST /api/v1/cashflow/simulate
+ * and compares the backend's simulated projection against the baseline forecast. Simulations are read-only on
+ * the server: no invoices, promises, payments or balances change, and useSimulation invalidates nothing.
+ * Customer and invoice pickers are filled from GET /customers and GET /invoices.
+ */
 import { FlaskConical, RotateCcw } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useState, type FormEvent } from "react";
@@ -12,26 +18,40 @@ import { useCustomers, useInvoices, useSimulation } from "@/lib/api/hooks";
 import type { Schemas } from "@/lib/api/types";
 import { formatDate } from "@/lib/format/dates";
 
+// Same client-only, code-split Recharts module as the cash-flow page, with a fixed-height skeleton.
 const SimulationChart = dynamic(() => import("@/components/charts/forecast-chart").then((m) => m.SimulationChart), {
   ssr: false,
   loading: () => <Skeleton className="h-80 w-full" />,
 });
 
+// Who pays late: the largest-balance customer (resolved by the backend), a chosen customer, or one invoice.
 type Target = "largest" | "customer" | "invoice";
 
+/** Client page: form state on the left, the last simulation result on the right. */
 export default function ScenariosPage() {
   const [target, setTarget] = useState<Target>("largest");
   const [customerId, setCustomerId] = useState("");
   const [invoiceId, setInvoiceId] = useState("");
+  // Kept as text for the number input; validated below (1–365 days, unlike settings which allow 0).
   const [delay, setDelay] = useState("15");
   const [horizon, setHorizon] = useState(90);
+  // Only customers with a balance, largest first, capped at the first 200 (no paging in the picker).
   const customers = useCustomers({ with_balance: true, sort: "outstanding", page_size: 200 });
+  // Fetched only in "invoice" mode (enabled flag). Open invoices, optionally narrowed to the chosen customer,
+  // again capped at 200.
   const invoices = useInvoices({ status: "open", customer_id: customerId || undefined, page_size: 200 }, target === "invoice");
+  // A mutation used as an on-demand read: the result lives in mutation state, not the query cache, and stays
+  // visible until the next run or reset(). "Back to baseline" just calls sim.reset(); there is nothing to undo
+  // on the server.
   const sim = useSimulation();
   const result = sim.data;
   const delayDays = Number(delay);
   const delayValid = Number.isInteger(delayDays) && delayDays >= 1 && delayDays <= 365;
 
+  /**
+   * Builds the SimulationRequest: `largest_customer` is true only in "largest" mode, and customer_id /
+   * invoice_id are added only for their own mode, so the backend never receives conflicting targets.
+   */
   function onRun(e: FormEvent) {
     e.preventDefault();
     if (!delayValid) return;
@@ -41,8 +61,17 @@ export default function ScenariosPage() {
     sim.mutate(body);
   }
 
+  // The submit button is disabled until the chosen mode has its target. Changing the customer clears the
+  // selected invoice (see its onChange), so an invoice from another customer cannot be submitted.
   const canRun = delayValid && (target === "largest" || (target === "customer" && customerId) || (target === "invoice" && invoiceId));
 
+  // Rendering notes:
+  // - Editing the form after a run does not clear the result. The result banner therefore uses the server's
+  //   echoed target_label and delay_days rather than the current form values.
+  // - Request errors are shown under the form through describeError(); the button shows a spinner meanwhile.
+  // - The sign of a difference is read from the decimal string's leading "-", never by parsing to a number.
+  // - Simulated values use the dedicated "sim" colour so they never look like actual or projected figures.
+  // - Picker labels show the raw decimal `outstanding` string rather than formatted money.
   return (
     <>
       <PageHeader title="What-If Analysis" subtitle="Test a delayed payment against your projected cash. Simulations never change your records." />

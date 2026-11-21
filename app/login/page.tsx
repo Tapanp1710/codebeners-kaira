@@ -1,10 +1,25 @@
+/**
+ * Public sign-in page. It sits outside the (app) route group, so it does not run the server-side session check
+ * or mount the app Providers. This file is a Server Component that renders static branding; all interactive
+ * behaviour (credentials, silent session resume, redirect back) lives in the client LoginForm.
+ */
 import type { Metadata } from "next";
 import { Suspense } from "react";
 
 import { LoginForm } from "@/components/auth/login-form";
 
+// Rendered as "Sign in · KAIRA" through the root layout's title template.
 export const metadata: Metadata = { title: "Sign in" };
 
+/**
+ * Two-column layout: the navy brand panel only appears from the lg breakpoint; on phones only the form shows.
+ *
+ * LoginForm reads `?next=`, `?resume=1` and `?expired=1` with useSearchParams. Next.js requires a Suspense
+ * boundary around such a component so the rest of the page can still be prerendered; the fallback is empty
+ * because the form appears immediately on the client. Inside the form, `next` is passed through safeNext()
+ * (same-origin relative paths only, never /api/), `resume=1` first tries a silent POST /auth/refresh, and
+ * `expired=1` shows the "session expired" notice set by lib/api/client.ts when a refresh fails.
+ */
 export default function LoginPage() {
   return (
     <main className="grid min-h-dvh lg:grid-cols-[1.1fr_1fr]">
