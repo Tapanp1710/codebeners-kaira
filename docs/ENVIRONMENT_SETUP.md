@@ -13,6 +13,7 @@
 |---|---|---|---|---|
 | `BACKEND_ORIGIN` | **server only** | yes | `http://127.0.0.1:8000` | Where the Next.js server reaches the backend. Origin only, no `/api/v1`. Never sent to the browser |
 | `BACKEND_TIMEOUT_MS` | server only | no | `30000` | Upstream timeout for proxied calls (voice uses at least 90 s) |
+| `TRUSTED_CLIENT_IP_HEADER` | server only | no | unset | Header that **your** reverse proxy sets to the browser's IP (e.g. `x-real-ip`; for `x-forwarded-for` the rightmost hop is used). Unset: no client IP is forwarded, and a browser-supplied `X-Forwarded-For`/`X-Real-IP`/`Forwarded` is never passed on. Set the backend's `FORWARDED_ALLOW_IPS` to this server's address only when this is set |
 | `NEXT_PUBLIC_APP_NAME` | public | no | `KAIRA` | Page title |
 | `NEXT_PUBLIC_APP_ENV` | public | no | `development` | Informational |
 | `E2E_EMAIL`, `E2E_PASSWORD` | test runner only | for E2E | | Owner account on a **non-production** backend |

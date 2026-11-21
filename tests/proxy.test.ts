@@ -7,7 +7,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { forwardedRequestHeaders, proxyToBackend, rewriteSetCookie, upstreamPath } from "@/lib/server/proxy";
+import { forwardedRequestHeaders, proxyToBackend, rewriteSetCookie, trustedClientIp, upstreamPath } from "@/lib/server/proxy";
 
 // Internal-looking host on purpose: the outage test asserts this name never appears in a response body.
 const ORIGIN = "http://backend.internal:8000";
@@ -177,5 +177,68 @@ describe("proxyToBackend", () => {
     const res = await proxyToBackend(new Request("http://app.local/x"), ["docs"], { origin: ORIGIN, timeoutMs: 10, fetchImpl });
     expect(res.status).toBe(404);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+// Regressions found by probing the production server (Next decodes catch-all segments before the route sees them).
+describe("path decoding", () => {
+  it("never decodes a second time: a literal '%74' segment is not turned into 't'", () => {
+    // The browser sent "heal%2574h"; Next passes "heal%74h". Re-decoding would route to /health.
+    expect(upstreamPath(["api", "v1", "heal%74h"])).toBeNull();
+  });
+  it("answers a malformed escape with the 404 envelope instead of throwing (was HTTP 500)", async () => {
+    const fetchImpl = vi.fn();
+    for (const seg of ["%E0%A4%A", "%", "%zz"]) {
+      expect(() => upstreamPath(["api", "v1", seg])).not.toThrow();
+      const res = await proxyToBackend(new Request("http://app.local/x"), ["api", "v1", seg], { origin: ORIGIN, timeoutMs: 10, fetchImpl });
+      expect(res.status).toBe(404);
+      expect((await res.json()).error.code).toBe("NOT_FOUND");
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+  it("still encodes legitimate decoded segments exactly once", () => {
+    expect(upstreamPath(["api", "v1", "customers", "3f2c-11"])).toBe("api/v1/customers/3f2c-11");
+  });
+});
+
+describe("trustedClientIp", () => {
+  const h = (init: Record<string, string>) => new Headers(init);
+  it("ignores every browser-supplied forwarding header when no trusted header is configured", () => {
+    expect(trustedClientIp(h({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "5.6.7.8" }), null)).toBeNull();
+  });
+  it("takes the rightmost X-Forwarded-For hop (appended by the trusted proxy), not the spoofable leftmost", () => {
+    expect(trustedClientIp(h({ "x-forwarded-for": "6.6.6.6, 203.0.113.9" }), "x-forwarded-for")).toBe("203.0.113.9");
+  });
+  it("reads a single-value header such as X-Real-IP and rejects anything that is not an IP", () => {
+    expect(trustedClientIp(h({ "x-real-ip": "198.51.100.7" }), "x-real-ip")).toBe("198.51.100.7");
+    expect(trustedClientIp(h({ "x-real-ip": "2001:db8::1" }), "x-real-ip")).toBe("2001:db8::1");
+    expect(trustedClientIp(h({ "x-real-ip": "evil; DROP" }), "x-real-ip")).toBeNull();
+    expect(trustedClientIp(h({ "x-real-ip": "999.1.1.1" }), "x-real-ip")).toBeNull();
+  });
+  it("never copies incoming forwarding headers upstream; only the trusted address is set", async () => {
+    let seen: Headers | null = null;
+    const fetchImpl = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return upstream("{}", { headers: { "content-type": "application/json" } });
+    });
+    const req = new Request("http://app.local/x", { headers: { "x-forwarded-for": "6.6.6.6", "x-real-ip": "6.6.6.6", forwarded: "for=6.6.6.6" } });
+    await proxyToBackend(req, ["api", "v1", "dashboard"], { origin: ORIGIN, timeoutMs: 1000, fetchImpl, clientIp: null });
+    expect(seen!.get("x-forwarded-for")).toBeNull();
+    expect(seen!.get("x-real-ip")).toBeNull();
+    expect(seen!.get("forwarded")).toBeNull();
+  });
+});
+
+describe("root proxy (middleware) for /api/backend", () => {
+  it("answers malformed percent-encoding with a 400 envelope before Next's own param decoding (which would 500)", async () => {
+    const { NextRequest } = await import("next/server");
+    const { proxy } = await import("@/proxy");
+    const bad = proxy(new NextRequest("http://app.local/api/backend/api/v1/%E0%A4%A"));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error.code).toBe("BAD_REQUEST_PATH");
+    // Well-formed API calls pass through without the page login redirect (the backend answers 401 itself).
+    const ok = proxy(new NextRequest("http://app.local/api/backend/api/v1/auth/me"));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("location")).toBeNull();
   });
 });

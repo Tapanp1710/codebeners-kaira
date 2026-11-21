@@ -33,6 +33,16 @@ export function backendOrigin(): string {
 }
 
 /** Default upstream timeout in ms: BACKEND_TIMEOUT_MS when it is a positive number, otherwise 30 s. */
+/**
+ * Name of a header set by the reverse proxy in front of this server that carries the browser's address
+ * (for example "x-real-ip", or "x-forwarded-for" from a platform proxy that appends to it). Unset means no
+ * client address is trusted or forwarded. Only set it when every request reaches Next through that proxy.
+ */
+export function trustedClientIpHeader(): string | null {
+  const raw = process.env.TRUSTED_CLIENT_IP_HEADER?.trim().toLowerCase();
+  return raw && /^[a-z0-9-]+$/.test(raw) ? raw : null;
+}
+
 export function backendTimeoutMs(): number {
   const value = Number(process.env.BACKEND_TIMEOUT_MS);
   return Number.isFinite(value) && value > 0 ? value : 30_000;

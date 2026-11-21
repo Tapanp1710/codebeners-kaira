@@ -11,6 +11,21 @@ import { NextResponse, type NextRequest } from "next/server";
  */
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+  // Backend proxy calls: only reject malformed percent-encoding here. Next decodes catch-all params before
+  // the route handler runs and answers a bad escape (e.g. "%E0%A4%A") with a bare HTTP 500; this returns the
+  // usual error envelope with 400 instead. Authentication for API calls is the backend's job (401 envelope),
+  // so there is no login redirect on this branch.
+  if (pathname.startsWith("/api/backend/")) {
+    try {
+      for (const segment of pathname.split("/")) decodeURIComponent(segment);
+    } catch {
+      return NextResponse.json(
+        { success: false, data: null, error: { code: "BAD_REQUEST_PATH", message: "The request path is not valid URL encoding.", details: null } },
+        { status: 400 },
+      );
+    }
+    return NextResponse.next();
+  }
   if (!request.cookies.has("kaira_access")) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
@@ -29,6 +44,7 @@ export function proxy(request: NextRequest) {
 // backend protects itself) are not matched.
 export const config = {
   matcher: [
+    "/api/backend/:path*",
     "/dashboard/:path*",
     "/customers/:path*",
     "/invoices/:path*",

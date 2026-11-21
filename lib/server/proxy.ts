@@ -43,7 +43,7 @@ const FORWARD_RESPONSE_HEADERS = ["content-type", "x-request-id", "retry-after",
  * origin     backend origin from BACKEND_ORIGIN (already validated, no path).
  * timeoutMs  default upstream timeout; audio endpoints are raised to at least 90 s below.
  * fetchImpl  injectable fetch for tests; defaults to the global fetch.
- * clientIp   first X-Forwarded-For hop seen by the route handler, forwarded as x-forwarded-for.
+ * clientIp   browser address from a trusted proxy header (trustedClientIp), forwarded as x-forwarded-for.
  */
 export type ProxyOptions = {
   origin: string;
@@ -89,20 +89,48 @@ export function rewriteSetCookie(header: string): string {
  * Joins the catch-all segments and validates them against the allow-list.
  *
  * Returns the relative upstream path (e.g. "api/v1/invoices/123") or null when the path must not be
- * forwarded. Each segment is decoded then re-encoded to normalise it; "." and ".." segments are rejected
- * outright so a request cannot walk out of /api/v1 on the backend. Note that decodeURIComponent throws
- * on a malformed escape sequence and that error is not caught here.
+ * forwarded (the caller answers 404 NOT_FOUND).
+ *
+ * Next has already percent-decoded each catch-all segment (verified on the production server: "%2574"
+ * arrives as "%74"), so segments are encoded exactly once here and never decoded again. Decoding a second
+ * time would route "heal%2574h" to "/health" and would throw on a literal "%" (HTTP 500). A segment Next
+ * could not decode arrives raw; its "%" is encoded to "%25", which the allow-list rejects. "." and ".."
+ * segments are rejected outright so a request cannot walk out of /api/v1 on the backend.
  */
 export function upstreamPath(segments: string[]): string | null {
-  const path = segments.map((s) => encodeURIComponent(decodeURIComponent(s))).join("/");
   if (segments.some((s) => s === ".." || s === ".")) return null;
+  const path = segments.map((s) => encodeURIComponent(s)).join("/");
   return ALLOWED_PATH.test(path) ? path : null;
+}
+
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const IPV6 = /^[0-9a-f:]+(%[0-9a-z]+)?$/i;
+
+/**
+ * The browser's address, read ONLY from a header set by a reverse proxy the operator trusts
+ * (TRUSTED_CLIENT_IP_HEADER). Route handlers cannot see the socket address, and any X-Forwarded-For or
+ * X-Real-IP the browser sends is attacker-controlled, so with no trusted header configured this returns
+ * null and no client address is forwarded (the backend then sees this server as the client; its per-e-mail
+ * login limit still applies). For X-Forwarded-For the RIGHTMOST entry is used: it was appended by the
+ * nearest trusted proxy, while entries to its left are whatever the client sent. Values that are not a
+ * syntactically valid IP are ignored.
+ */
+export function trustedClientIp(incoming: Headers, trustedHeader: string | null): string | null {
+  if (!trustedHeader) return null;
+  const raw = incoming.get(trustedHeader);
+  if (!raw) return null;
+  const hops = raw.split(",").map((h) => h.trim()).filter(Boolean);
+  const candidate = trustedHeader.toLowerCase() === "x-forwarded-for" ? hops.at(-1) : hops[0];
+  if (!candidate) return null;
+  const ip = candidate.replace(/^\[|\]$/g, "");
+  return IPV4.test(ip) || (ip.includes(":") && IPV6.test(ip)) ? ip : null;
 }
 
 /**
  * Builds the upstream request headers from the allow-list. The browser's Cookie header is passed
  * through verbatim (it carries kaira_access, and kaira_refresh on /auth/* calls), as is X-CSRF-Token,
- * which the backend checks on unsafe methods. The client IP is set as x-forwarded-for when known.
+ * which the backend checks on unsafe methods. Incoming forwarding headers (X-Forwarded-For, X-Real-IP,
+ * Forwarded) are never copied; the client IP from `trustedClientIp` is set as x-forwarded-for when known.
  */
 export function forwardedRequestHeaders(incoming: Headers, clientIp?: string | null): Headers {
   const headers = new Headers();

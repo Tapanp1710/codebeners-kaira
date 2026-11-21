@@ -6,8 +6,8 @@
  * (lib/server/proxy.ts), which validates them, forwards the request and maps the response back.
  * This file only resolves configuration (BACKEND_ORIGIN, timeout) and the client IP.
  */
-import { backendOrigin, backendTimeoutMs, FrontendConfigError } from "@/lib/server/env";
-import { proxyToBackend } from "@/lib/server/proxy";
+import { backendOrigin, backendTimeoutMs, FrontendConfigError, trustedClientIpHeader } from "@/lib/server/env";
+import { proxyToBackend, trustedClientIp } from "@/lib/server/proxy";
 
 // Always run per request: proxied responses depend on the caller's cookies and must never be cached.
 export const dynamic = "force-dynamic";
@@ -29,7 +29,8 @@ async function handle(request: Request, ctx: { params: Promise<{ path: string[] 
   }
   // First X-Forwarded-For hop as received by this server (set by whatever sits in front of Next.js).
   // It is taken from the incoming header without verification, so it is only as trustworthy as that hop.
-  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  // Never the browser-supplied X-Forwarded-For: only a header from a configured trusted proxy (see env.ts).
+  const clientIp = trustedClientIp(request.headers, trustedClientIpHeader());
   return proxyToBackend(request, path, { origin, timeoutMs: backendTimeoutMs(), clientIp });
 }
 
