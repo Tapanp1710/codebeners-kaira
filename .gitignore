@@ -1,7 +1,25 @@
+# secrets / local config
 .env
+.env.*
+!.env.example
+!.env.production.example
+
+# python
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+.coverage
+htmlcov/
+
+# runtime artefacts
+*.log
+backups/
+.run/
+
+# local tooling
+.codebenders/
+.vscode/
+.idea/

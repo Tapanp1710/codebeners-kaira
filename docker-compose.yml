@@ -1,0 +1,47 @@
+# KAIRA backend - local development stack.
+# Usage: docker compose up -d db        (database only, run API from the venv)
+#        docker compose up -d --build   (database + API container)
+name: kaira-backend
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kaira}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kaira_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-kaira}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - kaira_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Inside the compose network the database host is "db".
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kaira}:${POSTGRES_PASSWORD:-kaira_dev_password}@db:5432/${POSTGRES_DB:-kaira}
+      RUN_MIGRATIONS_ON_START: "true"
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  kaira_pgdata:
