@@ -66,9 +66,13 @@ per-IP key would throttle every user behind a shared proxy (see "Client IP" belo
 ## Client IP
 
 The login per-IP key uses the address uvicorn reports. Uvicorn trusts `X-Forwarded-For` only from
-`FORWARDED_ALLOW_IPS` (default `127.0.0.1`). List the frontend server there **only if** its proxy does not
-pass through a browser-supplied `X-Forwarded-For`. Otherwise a client could choose its own rate-limit key. That is a
-requirement on the frontend proxy (`lib/server/proxy.ts` in kaira-frontend).
+`FORWARDED_ALLOW_IPS` (default `127.0.0.1`).
+
+The kaira-frontend proxy (commit `abddbf3`) never copies a browser-supplied `X-Forwarded-For`, `X-Real-IP` or
+`Forwarded` header. It sets `X-Forwarded-For` only from a header named in its `TRUSTED_CLIENT_IP_HEADER`, which is
+set by the operator's own reverse proxy; for `X-Forwarded-For` it uses the rightmost hop, and the value must be a
+valid IP. So it is safe to list the frontend server's address in `FORWARDED_ALLOW_IPS` **when** the frontend has
+`TRUSTED_CLIENT_IP_HEADER` configured.
 
 When `FORWARDED_ALLOW_IPS` doesn't list the frontend server, every request appears to come from the frontend server,
 so the per-IP login budget is shared and the per-e-mail limit still applies.
@@ -104,4 +108,4 @@ attempts, audit, provider secrets, logging, uploads, error responses and rate li
 | Audit | Payments, bill payments, every attempt transition, logins and CLI user creation are audited. The application never updates or deletes audit rows. The database doesn't enforce append-only; a DB-level trigger is a possible hardening step | OK / note |
 | Secrets in logs | The Sarvam key is only ever sent as a request header and never logged. httpx URL logging is silenced. Request IDs from clients are validated (`^[A-Za-z0-9._-]{1,64}$`) | OK |
 | Error responses | One envelope; unhandled errors return a generic 500 with no stack trace or SQL. Database errors become 503 or 409 without driver text | OK |
-| Client IP trust | uvicorn trusts `X-Forwarded-For` only from `FORWARDED_ALLOW_IPS`. The frontend proxy must not pass through a browser-supplied value (see "Client IP") | Requirement on the frontend |
+| Client IP trust | uvicorn trusts `X-Forwarded-For` only from `FORWARDED_ALLOW_IPS`. The frontend proxy no longer passes through browser-supplied forwarding headers (frontend `abddbf3`) | **Fixed** (frontend) |
