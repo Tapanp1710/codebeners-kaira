@@ -49,7 +49,7 @@ export const keys = {
 // explicitly. "payments" matches no key produced by `keys` (payment lists live under "customer"/"invoice").
 const FINANCIAL_ROOTS = [
   "dashboard", "insights", "customers", "customer", "invoices", "invoice", "receivables", "receivables-summary",
-  "forecast", "bills", "commitments", "audit", "payments",
+  "forecast", "bills", "commitments", "audit", "payments", "payment-attempts",
 ];
 
 /**
@@ -61,6 +61,17 @@ export function invalidateFinancial(qc: QueryClient) {
 }
 
 // ------------------------------------------------------------------ reads
+
+/**
+ * Every pending payment attempt of the business (server-side registry, backend API 1.1.0), independent of
+ * any list's pagination. Pending attempts are few; the first 200 are returned and `total` says if there are more.
+ */
+export const usePendingPaymentAttempts = () =>
+  useQuery({
+    queryKey: ["payment-attempts", { status: "pending" }],
+    queryFn: () => unwrap(api.GET("/api/v1/payment-attempts", { params: { query: { status: "pending", page_size: 200 } } })),
+  });
+
 export const useDashboard = () =>
   useQuery({ queryKey: keys.dashboard, queryFn: () => unwrap(api.GET("/api/v1/dashboard")) });
 

@@ -32,7 +32,12 @@
 import { ApiError } from "./errors";
 import type { Schemas } from "./types";
 
-type AttemptBase = { v: 1; key: string; businessId: string; userId: string; startedAt: string };
+/**
+ * v1: written by builds before the server-side registry. The key may already have been sent straight to
+ * POST /invoices|bills/{id}/payments, so a v1 record is never dropped until the server has it.
+ * v2: the key is only ever sent to POST /payment-attempts; `attemptId` is set once registration succeeded.
+ */
+type AttemptBase = { v: 1 | 2; key: string; businessId: string; userId: string; startedAt: string; attemptId?: string };
 
 export type BillPaymentAttempt = AttemptBase & { billId: string; body: Schemas["BillPaymentCreate"] };
 export type InvoicePaymentAttempt = AttemptBase & { invoiceId: string; body: Schemas["PaymentCreate"] };
@@ -109,9 +114,10 @@ function createAttemptStore<A extends AttemptBase & { body: object }>(cfg: {
     try {
       const a = JSON.parse(raw) as Record<string, unknown>;
       const valid =
-        a.v === 1 && typeof a.key === "string" && a.key.length > 0 && a.key.length <= 200 &&
+        (a.v === 1 || a.v === 2) && typeof a.key === "string" && a.key.length > 0 && a.key.length <= 200 &&
         a.businessId === businessId && a[cfg.idField] === id && typeof a.userId === "string" &&
-        typeof a.startedAt === "string" && cfg.validBody(a.body as Record<string, unknown> | undefined);
+        typeof a.startedAt === "string" && (a.attemptId === undefined || typeof a.attemptId === "string") &&
+        cfg.validBody(a.body as Record<string, unknown> | undefined);
       return valid ? (a as unknown as A) : null;
     } catch {
       return null;
@@ -168,10 +174,18 @@ function createAttemptStore<A extends AttemptBase & { body: object }>(cfg: {
     const id = (input as unknown as Record<string, string>)[cfg.idField];
     const existing = load(input.businessId, id);
     if (existing) return { attempt: existing, created: false };
-    const attempt = { v: 1, ...input, startedAt: new Date().toISOString() } as unknown as A;
+    const attempt = { v: 2, ...input, startedAt: new Date().toISOString() } as unknown as A;
     store.set(storageKey(input.businessId, id), JSON.stringify(attempt));
     notify();
     return { attempt, created: true };
+  }
+
+  /** Records the server attempt id once registration succeeded (only for the stored attempt with this key). */
+  function setServerId(businessId: string, id: string, key: string, attemptId: string): void {
+    const current = load(businessId, id);
+    if (current?.key !== key || current.attemptId === attemptId) return;
+    store.set(storageKey(businessId, id), JSON.stringify({ ...current, attemptId }));
+    notify();
   }
 
   /** Backend confirmed the payment (recorded or replayed): remove the attempt and leave a completion marker. */
@@ -234,7 +248,7 @@ function createAttemptStore<A extends AttemptBase & { body: object }>(cfg: {
     return locks ? (locks.request(`kaira-${cfg.name}-payment:${scope(businessId, id)}`, fn) as Promise<T>) : fn();
   }
 
-  return { storageKey, load, loadDone, listPending, create, confirm, reject, subscribe, withLock };
+  return { storageKey, load, loadDone, listPending, create, setServerId, confirm, reject, subscribe, withLock };
 }
 
 // ------------------------------------------------------------------ bill payments
@@ -251,6 +265,7 @@ export const confirmBillPaymentAttempt = bills.confirm;
 export const rejectBillPaymentAttempt = bills.reject;
 export const subscribeBillPaymentAttempts = bills.subscribe;
 export const withBillPaymentLock = bills.withLock;
+export const setBillPaymentServerId = bills.setServerId;
 
 // ------------------------------------------------------------------ invoice payments
 
@@ -271,6 +286,10 @@ export const confirmInvoicePaymentAttempt = invoices.confirm;
 export const rejectInvoicePaymentAttempt = invoices.reject;
 export const subscribeInvoicePaymentAttempts = invoices.subscribe;
 export const withInvoicePaymentLock = invoices.withLock;
+export const setInvoicePaymentServerId = invoices.setServerId;
+
+/** The two local stores by resource type, for code that handles both. */
+export const attemptStores = { bill: bills, invoice: invoices } as const;
 
 /**
  * True only when the backend processed the request and rejected it, so nothing was recorded under the key

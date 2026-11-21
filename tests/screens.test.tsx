@@ -13,6 +13,7 @@ import { PaymentDialog } from "@/components/invoices/payment-form";
 import { AssistantPanel } from "@/components/voice/assistant-panel";
 import type { Invoice } from "@/lib/api/types";
 
+import { attemptServer } from "./attempt-server";
 import { envelope } from "./fixtures";
 import { pathOf, renderApp } from "./render";
 
@@ -58,24 +59,23 @@ describe("PaymentDialog", () => {
     await userEvent.type(screen.getByLabelText("Amount (₹)"), "12000.01");
     await userEvent.click(screen.getByRole("button", { name: "Record payment" }));
     expect(await screen.findByText(/Cannot exceed the outstanding ₹12,000.00/)).toBeInTheDocument();
-    expect(requests).toHaveLength(0);
+    // Only the read of pending attempts happens; no payment is registered or executed.
+    expect(requests.filter((r) => r.method !== "GET")).toHaveLength(0);
   });
 
-  // Each submission carries an Idempotency-Key (retries cannot double-record); the confirmed balance shown is the backend's.
-  it("records a partial payment with an idempotency key and shows the confirmed balance", async () => {
-    const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />, {
-      handler: (req) =>
-        pathOf(req) === "POST /invoices/inv-1/payments"
-          ? envelope({ replayed: false, payment: { amount: "5000.00", payment_date: "2026-11-21" }, invoice: { ...invoice, paid: "11000.00", outstanding: "7000.00" } }, 201)
-          : envelope({}),
-    });
+  // The payment is registered (with a key) before it is executed; the confirmed balance shown is the backend's.
+  it("records a partial payment through a registered attempt and shows the confirmed balance", async () => {
+    const backend = attemptServer({ kind: "invoice", targets: { "inv-1": { amount: "12000.00", label: "INV-0001" } } });
+    const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />, { handler: backend.handler });
     await userEvent.type(screen.getByLabelText("Amount (₹)"), "5000");
     await userEvent.selectOptions(screen.getByLabelText("Method"), "upi");
     await userEvent.click(screen.getByRole("button", { name: "Record payment" }));
     expect(await screen.findByTestId("payment-confirmed")).toHaveTextContent("₹7,000.00");
-    const post = requests.find((r) => r.method === "POST")!;
-    expect(post.headers.get("idempotency-key")).toMatch(/.{8,}/);
-    expect(await post.json()).toMatchObject({ amount: "5000", payment_method: "upi" });
+    const register = requests.find((r) => pathOf(r) === "POST /payment-attempts")!;
+    const body = await register.json();
+    expect(body.idempotency_key).toMatch(/.{8,}/);
+    expect(body).toMatchObject({ resource_type: "invoice", resource_id: "inv-1", amount: "5000", payment_method: "upi" });
+    expect(backend.state.payments.size).toBe(1);
   });
 });
 
