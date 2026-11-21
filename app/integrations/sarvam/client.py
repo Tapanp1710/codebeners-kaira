@@ -24,6 +24,8 @@ from app.core.config import Settings
 from app.core.exceptions import ProviderError, ProviderNotConfiguredError, ServiceUnavailableError
 
 logger = logging.getLogger(__name__)
+# The module docstring lists retries only for 429/503/timeouts, but this set also retries
+# 500, 502 and 504 (transient server errors).
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -41,17 +43,22 @@ class Speech:
     request_id: str | None
 
 
+# One instance is shared via app.state.sarvam. It holds no open connection; each call opens and
+# closes its own httpx.Client. transport, if given, replaces the real network transport.
 class SarvamClient:
     def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None) -> None:
         self.settings = settings
         self._transport = transport
 
     # ------------------------------------------------------------------ plumbing
+    # Checked per call, so a missing key fails only the feature that needs it (STT, TTS or chat).
     def _require_key(self, feature: str) -> str:
         if not self.settings.SARVAM_API_KEY:
             raise ProviderNotConfiguredError(feature)
         return self.settings.SARVAM_API_KEY
 
+    # The timeout applies to every phase; connect uses a fixed 10 s. rstrip("/") avoids a double
+    # slash when joining the base URL with paths such as /speech-to-text.
     def _client(self) -> httpx.Client:
         return httpx.Client(
             base_url=self.settings.SARVAM_BASE_URL.rstrip("/"),
@@ -62,12 +69,16 @@ class SarvamClient:
     def _post(self, feature: str, path: str, **kwargs: Any) -> dict[str, Any]:
         key = self._require_key(feature)
         headers = {"api-subscription-key": key}
+        # Total attempts = SARVAM_MAX_RETRIES + 1 (default 2 retries means up to 3 sends).
+        # These calls never write business data, so repeats are safe.
         attempts = self.settings.SARVAM_MAX_RETRIES + 1
         last_error: Exception | None = None
         with self._client() as client:
             for attempt in range(attempts):
                 try:
                     response = client.post(path, headers=headers, **kwargs)
+                # Network failures are retried like retryable statuses. Only the final attempt's
+                # outcome determines the error code (PROVIDER_TIMEOUT or PROVIDER_UNAVAILABLE).
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     last_error = exc
                     logger.warning(
@@ -75,10 +86,13 @@ class SarvamClient:
                     )
                 else:
                     if response.status_code < 400:
+                        # A 2xx response with a non-JSON body is a provider error, not a retry case.
                         try:
                             return response.json()
                         except ValueError as exc:
                             raise ProviderError(f"{feature}: provider returned invalid JSON.") from exc
+                    # On the final attempt a retryable status falls through to _raise_for,
+                    # so a 429 surfaces as PROVIDER_RATE_LIMITED.
                     if response.status_code in RETRY_STATUSES and attempt + 1 < attempts:
                         logger.warning(
                             "Sarvam %s returned %d (attempt %d)", feature, response.status_code, attempt + 1
@@ -86,6 +100,8 @@ class SarvamClient:
                         last_error = None
                     else:
                         self._raise_for(feature, response)
+                # Exponential backoff: 0.5 s, 1 s, 2 s, ... capped at 8 s. time.sleep blocks the
+                # calling thread. No sleep follows the final attempt.
                 if attempt + 1 < attempts:
                     time.sleep(min(8.0, 0.5 * 2**attempt))
         if isinstance(last_error, httpx.TimeoutException):
@@ -96,6 +112,8 @@ class SarvamClient:
             f"{feature}: the provider is unavailable. Please retry.", code="PROVIDER_UNAVAILABLE"
         )
 
+    # Maps provider HTTP errors to app errors. Only the first 300 characters of the provider's
+    # message are copied into details. The API key is never included in messages or details.
     @staticmethod
     def _raise_for(feature: str, response: httpx.Response) -> None:
         status = response.status_code
@@ -113,6 +131,7 @@ class SarvamClient:
         details = {"provider_status": status}
         if isinstance(provider_message, str):
             details["provider_message"] = provider_message[:300]
+        # Treated as a configuration problem (bad key), so the message points at SARVAM_API_KEY.
         if status in (401, 403):
             raise ProviderError(f"{feature}: Sarvam rejected the API key. Check SARVAM_API_KEY.", details)
         if status == 402:
@@ -127,9 +146,13 @@ class SarvamClient:
             raise ServiceUnavailableError(
                 f"{feature}: the provider is unavailable.", details, code="PROVIDER_UNAVAILABLE"
             )
+        # Other 4xx responses are re-raised as 502, not with the provider's status, so the client
+        # does not mistake the failure for its own request error.
         raise ProviderError(f"{feature}: the provider rejected the request.", details, status_code=502)
 
     # ------------------------------------------------------------------ STT
+    # Audio is sent as multipart. language_code is included only when given; otherwise the field
+    # is omitted.
     def transcribe(
         self, audio: bytes, filename: str, content_type: str, language_code: str | None
     ) -> Transcription:
@@ -172,12 +195,16 @@ class SarvamClient:
         if not isinstance(audios, list) or not audios or not isinstance(audios[0], str):
             raise ProviderError("Text-to-speech: provider response had no audio.")
         try:
+            # Concatenates the base64 chunks in order. validate=True rejects stray non-base64
+            # characters instead of silently dropping them.
             audio = b"".join(base64.b64decode(chunk, validate=True) for chunk in audios)
         except ValueError as exc:
             raise ProviderError("Text-to-speech: provider returned invalid audio data.") from exc
         return Speech(audio=audio, request_id=body.get("request_id"))
 
     # ------------------------------------------------------------------ chat
+    # Structured output via json_schema with strict=False. Provider adherence to the schema is not
+    # guaranteed, so the caller must still validate the returned JSON.
     def chat_json(self, messages: list[dict[str, str]], schema: dict[str, Any], name: str) -> str:
         payload: dict[str, Any] = {
             "model": self.settings.SARVAM_LLM_MODEL,
@@ -204,6 +231,7 @@ class SarvamClient:
             payload["reasoning_effort"] = self.settings.SARVAM_LLM_REASONING_EFFORT
         return self._chat(payload)
 
+    # Shared by both chat helpers. Returns only the first choice's message content.
     def _chat(self, payload: dict[str, Any]) -> str:
         body = self._post("AI assistant", "/v1/chat/completions", json=payload)
         try:
@@ -211,6 +239,8 @@ class SarvamClient:
             content = choice["message"].get("content")
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError("AI assistant: unexpected provider response shape.") from exc
+        # Empty content is an error. finish_reason goes into details to help diagnose cases such as
+        # truncation at max_tokens.
         if not content:
             reason = choice.get("finish_reason") if isinstance(choice, dict) else None
             raise ProviderError("AI assistant: provider returned no content.", {"finish_reason": reason})

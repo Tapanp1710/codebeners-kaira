@@ -20,6 +20,8 @@ from app.core.security import (
 )
 from app.models import Business, User
 
+# Methods exempt from the CSRF check. Only cookie-authenticated requests are checked; bearer
+# requests skip CSRF entirely.
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
@@ -27,6 +29,8 @@ def get_settings_dep(request: Request) -> Settings:
     return request.app.state.settings
 
 
+# One session per request. No commit happens here; the generator only closes the session when
+# the request finishes.
 def get_db(request: Request) -> Iterator[Session]:
     session: Session = request.app.state.session_factory()
     try:
@@ -58,6 +62,8 @@ class AuthContext:
 def get_auth_context(request: Request, db: DbSession, settings: SettingsDep) -> AuthContext:
     token: str | None = None
     via_cookie = False
+    # A bearer header takes precedence over the cookie. A bearer request with an invalid token
+    # does not fall back to the cookie.
     header = request.headers.get("authorization", "")
     if header.lower().startswith("bearer "):
         token = header[7:].strip()
@@ -70,10 +76,14 @@ def get_auth_context(request: Request, db: DbSession, settings: SettingsDep) -> 
     if claims is None:
         raise AuthenticationError("Your session has expired or is invalid.", "SESSION_EXPIRED")
 
+    # CSRF is enforced only for cookie auth on unsafe methods. The header must equal the csrf
+    # claim inside the access token.
     if via_cookie and request.method not in SAFE_METHODS:
         if not constant_time_equals(request.headers.get(CSRF_HEADER), claims.csrf):
             raise CsrfError()
 
+    # Re-checked against the database on every request. A deactivated user, or one whose business
+    # no longer matches the token, is rejected even when the token itself is valid.
     user = db.get(User, claims.user_id)
     if user is None or not user.is_active or user.business_id != claims.business_id:
         raise AuthenticationError("This account is not active.", "ACCOUNT_INACTIVE")
@@ -90,9 +100,11 @@ def get_auth_context(request: Request, db: DbSession, settings: SettingsDep) -> 
     )
 
 
+# Route parameter alias: declaring "ctx: Auth" runs the full authentication chain above.
 Auth = Annotated[AuthContext, Depends(get_auth_context)]
 
 
+# Role check only; no database query. Depends on Auth, so authentication runs first.
 def require_owner(ctx: Auth) -> AuthContext:
     if not ctx.is_owner:
         raise PermissionDeniedError("Only the business owner can perform this action.")

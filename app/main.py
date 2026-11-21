@@ -22,11 +22,22 @@ logger = logging.getLogger("kaira")
 API_VERSION = "1.0.0"
 
 
+# Application factory. Wires shared state (settings, engine, session factory, rate limiter,
+# Sarvam client) onto app.state and registers exception handlers and middleware.
+# The module-level `app = create_app()` at the bottom is the ASGI entry point; cli.py calls
+# create_app again for export-openapi.
 def create_app(settings: Settings | None = None) -> FastAPI:
+    # An explicit Settings (e.g. from cli.py) is used as-is; otherwise the cached
+    # get_settings() reads .env and the process environment.
     settings = settings or get_settings()
+    # Runs before any logging call. configure_logging removes only handlers it created earlier
+    # (marked _kaira), so calling create_app more than once does not duplicate output.
     configure_logging(settings.LOG_LEVEL, settings.LOG_FORMAT)
+    # Lazy: no connection is opened until first use. Shared via app.state, disposed on shutdown.
     engine = build_engine(settings)
 
+    # Startup/shutdown hook. Migrations (if enabled) run synchronously during startup and block
+    # the event loop until finished; app.state.ready is set only after they succeed.
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if settings.RUN_MIGRATIONS_ON_START:
@@ -41,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         yield
         app.state.ready = False
+        # Shutdown: clear readiness first, then release pooled database connections.
         engine.dispose()
         logger.info("KAIRA API stopped")
 
@@ -61,10 +73,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = build_session_factory(engine)
+    # Counters live in this process only; with multiple workers, each worker has its own limits.
     app.state.rate_limiter = RateLimiter()
+    # Construction does no network I/O. A missing SARVAM_API_KEY surfaces per call, not at startup.
     app.state.sarvam = SarvamClient(settings)
     app.state.ready = False
 
+    # Exception handlers are registered first. Middleware is added below; Starlette wraps the
+    # most recently added middleware outermost, so RequestContextMiddleware runs first.
     register_exception_handlers(app)
     app.add_middleware(
         BodySizeLimitMiddleware,
@@ -81,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_age=600,
     )
     app.add_middleware(RequestContextMiddleware)
+    # Health routes are mounted at the root, outside API_V1_PREFIX and the versioned router.
     app.include_router(health.router)
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)
     return app

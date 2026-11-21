@@ -19,9 +19,11 @@ from zoneinfo import ZoneInfo
 from pydantic import PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Resolves to the backend/ folder (two levels up); used to locate .env and Alembic files.
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 
+# Dev-only fallback when DATABASE_URL is unset. Staging/production require an explicit URL.
 DEV_DATABASE_URL = "postgresql+psycopg://kaira:kaira_dev_password@127.0.0.1:5432/kaira"
 SECURE_ENVS = {"staging", "production"}
 
@@ -30,8 +32,11 @@ class ConfigurationError(RuntimeError):
     """Raised when the environment is not configured safely enough to start."""
 
 
+# Pydantic settings model: each field is read from the environment or backend/.env by name.
+# Defaults here are the values used when nothing is set.
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BACKEND_ROOT / ".env", extra="ignore")
+    # Not an env var. True when JWT_SECRET_KEY was generated at startup; get_settings logs it.
     _ephemeral_secret: bool = PrivateAttr(default=False)
 
     # --- application -----------------------------------------------------------------
@@ -64,6 +69,8 @@ class Settings(BaseSettings):
 
     # --- CORS --------------------------------------------------------------------------
     FRONTEND_ORIGIN: str = "http://localhost:3000"
+    # NoDecode stops pydantic-settings from parsing this value as JSON; _split_origins handles
+    # comma-separated text instead.
     CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
 
     # --- request protection -------------------------------------------------------------
@@ -97,6 +104,8 @@ class Settings(BaseSettings):
     DEMO_OWNER_PASSWORD: str | None = None
 
     # ----------------------------------------------------------------------------------
+    # Field validators run while Settings() is constructed. A failed check is raised as a
+    # pydantic ValidationError, so startup stops with the message.
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
@@ -141,6 +150,8 @@ class Settings(BaseSettings):
             return None
         return value
 
+    # Cross-field rules run after all fields are parsed. In staging/production every problem is
+    # collected and raised together, so the operator sees the full list at once.
     @model_validator(mode="after")
     def _apply_environment_rules(self) -> Settings:
         problems: list[str] = []
@@ -192,11 +203,14 @@ class Settings(BaseSettings):
         return bool(self.SARVAM_API_KEY)
 
     @property
+    # "auto" is resolved from whether SARVAM_API_KEY is set. No network check is made.
     def extraction_provider(self) -> str:
         if self.AI_EXTRACTION_PROVIDER == "auto":
             return "sarvam" if self.sarvam_configured else "rules"
         return self.AI_EXTRACTION_PROVIDER
 
+    # Speaker is picked by language prefix (te, hi). Any other language, including en, uses the
+    # English speaker.
     def tts_speaker_for(self, language_code: str) -> str:
         prefix = language_code.split("-")[0].lower()
         return {
@@ -205,9 +219,12 @@ class Settings(BaseSettings):
         }.get(prefix, self.SARVAM_TTS_SPEAKER_EN)
 
 
+# Cached per process. Changing environment variables after the first call has no effect until
+# get_settings.cache_clear() is called.
 @functools.lru_cache
 def get_settings() -> Settings:
     settings = Settings()
+    # Logged once per process. The secret value itself is never logged.
     if getattr(settings, "_ephemeral_secret", False):
         logger.warning(
             "JWT_SECRET_KEY is not set; using an ephemeral development secret. "

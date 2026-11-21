@@ -24,6 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 
 
+# Config errors go to stderr with exit code 2, so every subcommand fails the same way.
 def _settings():
     from app.core.config import ConfigurationError, get_settings
 
@@ -36,6 +37,8 @@ def _settings():
 
 def cmd_check_config(_: argparse.Namespace) -> int:
     s = _settings()
+    # Only the text after '@' (host/db) is printed to avoid echoing credentials. If the URL has
+    # no '@', the whole string is printed.
     print(f"APP_ENV={s.APP_ENV}  database={s.DATABASE_URL.split('@')[-1]}")
     print(
         f"Voice/AI provider: {'Sarvam configured' if s.sarvam_configured else 'NOT configured (typed input only)'}"
@@ -50,6 +53,7 @@ def cmd_wait_db(args: argparse.Namespace) -> int:
     from app.db.session import build_engine, database_is_reachable
 
     engine = build_engine(_settings())
+    # Fixed 2-second polling interval; each probe opens and closes its own connection.
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
         if database_is_reachable(engine):
@@ -68,6 +72,8 @@ def cmd_migrate(_: argparse.Namespace) -> int:
     return 0
 
 
+# Builds a new engine per call and never disposes it; fine for a one-shot process.
+# Callers must close the returned session.
 def _session():
     from app.db.session import build_engine, build_session_factory
 
@@ -78,9 +84,12 @@ def cmd_seed(args: argparse.Namespace) -> int:
     from app.seed import seed_demo
 
     s = _settings()
+    # Guard against seeding demo data into staging/production unless --force is passed.
     if s.is_production_like and not args.force:
         print("Refusing to seed demo data in staging/production (use --force to override).", file=sys.stderr)
         return 2
+    # With no DEMO_OWNER_PASSWORD, a random one is generated; it is printed once and not written
+    # to disk by this command.
     password = s.DEMO_OWNER_PASSWORD
     generated = False
     if not password:
@@ -95,6 +104,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
     finally:
         db.close()
     print(f"Demo data ready for {result['owner_email']} (business {result['business_id']})")
+    # The password is printed only when this run created the owner account.
     if result["created_owner"] and generated:
         print(f"Generated demo owner password (shown once): {password}")
     elif result["created_owner"]:
@@ -110,15 +120,20 @@ def cmd_create_owner(args: argparse.Namespace) -> int:
     from app.utils.dates import business_today
 
     s = _settings()
+    # Password comes from KAIRA_OWNER_PASSWORD or an interactive prompt, never a CLI argument,
+    # so it does not appear in shell history.
     password = os.environ.get("KAIRA_OWNER_PASSWORD") or getpass.getpass("Owner password (min 10 chars): ")
     if len(password) < 10:
         print("Password must be at least 10 characters.", file=sys.stderr)
         return 2
     db = _session()
     try:
+        # Idempotent: an existing e-mail exits 0 without changes (lowercased lookup).
         if db.scalar(select(User).where(User.email == args.email.lower())):
             print("A user with that e-mail already exists; nothing changed.")
             return 0
+        # Decimal() and date.fromisoformat() raise on malformed --opening-cash or
+        # --opening-date values. No guard here, so bad input ends the command with a traceback.
         business = Business(
             name=args.business,
             business_type=args.business_type,
@@ -131,6 +146,7 @@ def cmd_create_owner(args: argparse.Namespace) -> int:
             overdue_collection_delay_days=s.DEFAULT_OVERDUE_COLLECTION_DELAY_DAYS,
         )
         db.add(business)
+        # flush() assigns business.id so the owner User can reference it before the commit.
         db.flush()
         db.add(
             User(
@@ -151,6 +167,8 @@ def cmd_create_owner(args: argparse.Namespace) -> int:
 def cmd_export_openapi(args: argparse.Namespace) -> int:
     from app.main import create_app
 
+    # Builds the app only to introspect routes. The engine is lazy, so no database connection
+    # is needed and lifespan startup does not run.
     spec = create_app(_settings()).openapi()
     path = Path(args.path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +177,7 @@ def cmd_export_openapi(args: argparse.Namespace) -> int:
     return 0
 
 
+# Each subcommand stores its handler with set_defaults(func=...); main dispatches on args.func.
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
