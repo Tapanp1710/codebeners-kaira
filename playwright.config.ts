@@ -1,4 +1,37 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { defineConfig, devices } from "@playwright/test";
+
+/**
+ * Deterministic fake microphone: a fixed 2 s, 440 Hz, 16 kHz mono PCM tone written once per run and fed to
+ * Chromium with --use-file-for-fake-audio-capture. Simulated audio only: it proves the browser recording
+ * pipeline, not live Sarvam transcription (that needs SARVAM_API_KEY and is reported separately).
+ */
+function fakeMicrophoneWav(): string {
+  const rate = 16_000;
+  const samples = rate * 2;
+  const buf = Buffer.alloc(44 + samples * 2);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(36 + samples * 2, 4);
+  buf.write("WAVEfmt ", 8);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20); // PCM
+  buf.writeUInt16LE(1, 22); // mono
+  buf.writeUInt32LE(rate, 24);
+  buf.writeUInt32LE(rate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(samples * 2, 40);
+  for (let i = 0; i < samples; i++) buf.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 8000), 44 + i * 2);
+  const dir = join(tmpdir(), "kaira-e2e");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "fake-mic-440hz.wav");
+  writeFileSync(file, buf);
+  return file;
+}
 
 /**
  * End-to-end tests against the REAL backend (BACKEND_ORIGIN) through the production build.
@@ -30,7 +63,13 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
         // Microphone permission plus Chromium's fake media stream: recording works headless, with no permission prompt.
         permissions: ["microphone"],
-        launchOptions: { args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] },
+        launchOptions: {
+          args: [
+            "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
+            `--use-file-for-fake-audio-capture=${fakeMicrophoneWav()}`,
+          ],
+        },
       },
     },
   ],

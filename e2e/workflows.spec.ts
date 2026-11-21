@@ -193,6 +193,12 @@ test.describe("assistant and approvals", () => {
 
   // Fake media devices (playwright.config.ts) let recording run headless. The end state depends on whether the backend has a Sarvam key; typed input must stay usable either way.
   test("voice: explicit recording, honest provider error, typed fallback still available", async ({ page }) => {
+    // The listening orb pulses forever, and Playwright only clicks an element once it stops moving, so the
+    // "stop" tap used to wait until the 30 s recording cap ended the animation and then START a new
+    // recording. With the user preference "reduce motion" (which the app honours in globals.css) the orb is
+    // still and the tap lands while recording. Audio comes from the deterministic fake microphone
+    // (playwright.config.ts); this proves the recording pipeline, not live Sarvam transcription.
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await login(page);
     await page.getByTestId("assistant-launcher").click();
     const panel = page.getByRole("dialog", { name: "KAIRA assistant" });
