@@ -81,21 +81,21 @@ export function LoginForm() {
   if (resuming) {
     return (
       <p role="status" className="text-sm text-muted">
+        {/* role="status" politely announces the silent refresh in progress; the form appears only if it fails. */}
         Restoring your session…
       </p>
     );
   }
 
-  // noValidate: browser validation bubbles are suppressed; the submit button stays disabled until both
-  // fields are non-empty and all credential checks happen on the backend. autoComplete hints let
-  // password managers fill the form.
   return (
     <form onSubmit={onSubmit} className="w-full max-w-sm space-y-5" noValidate>
       <div>
         <h1 className="font-display text-3xl font-semibold">Sign in</h1>
         <p className="mt-1 text-sm text-muted">Use the account your KAIRA administrator created.</p>
       </div>
+      {/* expired=1 comes from the API client's session-lost handler; a warn Notice is role="note", so it is read in order rather than interrupting. */}
       {params.get("expired") === "1" && <Notice tone="warn">Your session expired. Please sign in again.</Notice>}
+      {/* autoComplete username/current-password lets password managers fill the form; with noValidate on the form, `required` does not block submit. */}
       <Field label="Email">
         {(id) => (
           <Input id={id} type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
@@ -114,6 +114,7 @@ export function LoginForm() {
         )}
       </Field>
       <FormError message={error} />
+      {/* Enabled once both raw values are non-empty (a whitespace-only email still enables it); every credential check happens on the backend. */}
       <Button type="submit" size="lg" className="w-full" loading={submitting} disabled={!email || !password}>
         Sign in
       </Button>

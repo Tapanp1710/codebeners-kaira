@@ -26,22 +26,23 @@ export function ReminderDraft({ reminder }: { reminder: Reminder }) {
   // State is seeded once from the prop; ReminderDialog keys the draft by message so a new draft remounts it.
   const [text, setText] = useState(reminder.message);
   const [copied, setCopied] = useState(false);
-  // `generated_by` tells whether the text is the English template or a Sarvam translation of it.
-  // Copy uses the async Clipboard API (secure context required); a rejected write is not caught, so the
-  // label simply stays "Copy text".
   return (
     <div className="space-y-3 rounded-2xl bg-paper p-5 ring-1 ring-line" data-testid="reminder-draft">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="font-display font-semibold">Reminder for {reminder.customer_name}</p>
+        {/* Outstanding and overdue are computed by the backend from the ledger when the draft is requested. */}
         <p className="text-sm text-muted">
           Outstanding <Money value={reminder.total_outstanding} className="font-semibold text-ink" /> · overdue{" "}
           <Money value={reminder.overdue_amount} className="font-semibold text-danger" />
         </p>
       </div>
+      {/* generated_by says whether the text is the English template or a Sarvam translation of it; edits stay in this browser only. */}
       <Field label={`Draft (${reminder.language}${reminder.generated_by === "template" ? ", template" : ", translated by Sarvam"})`}>
         {(id) => <Textarea id={id} className="min-h-40" value={text} onChange={(e) => setText(e.target.value)} />}
       </Field>
+      {/* `note` is the backend's disclaimer (by default "Draft only. KAIRA never sends reminders automatically."). */}
       <p className="text-xs text-muted">{reminder.note}</p>
+      {/* Async Clipboard API (secure context required); a rejected write is not caught, so the label simply stays "Copy text". */}
       <Button
         variant="secondary"
         size="sm"
@@ -76,10 +77,7 @@ export function ReminderDialog({
 }) {
   const [language, setLanguage] = useState<LanguageCode>("en-IN");
   const [tone, setTone] = useState<"friendly" | "firm">("friendly");
-  // A plain mutation with no cache invalidation: drafting a reminder changes no data. Each click requests
-  // a new draft; the result is keyed by message text so a different draft resets the editable copy.
-  // For te-IN/hi-IN the backend needs its Sarvam key; without it the backend returns English (the
-  // notice below warns about this).
+  // A plain mutation with no cache invalidation: drafting a reminder changes no data.
   const reminder = useReminder();
   return (
     <Dialog open={open} onClose={onClose} title="Draft a payment reminder" description="Uses the real outstanding figures. Nothing is sent automatically." wide>
@@ -103,9 +101,11 @@ export function ReminderDialog({
             )}
           </Field>
         </div>
+        {/* te-IN/hi-IN drafts need the backend's Sarvam key; without it the backend returns English. */}
         {language !== "en-IN" && (
           <Notice tone="info">Telugu/Hindi drafts need the Sarvam key on the server. Without it, KAIRA returns English and says so.</Notice>
         )}
+        {/* Each click requests a fresh draft; invoice_id is null for a whole-customer reminder. */}
         <Button
           onClick={() => reminder.mutate({ customer_id: customerId, invoice_id: invoiceId ?? null, language, tone })}
           loading={reminder.isPending}
@@ -113,6 +113,7 @@ export function ReminderDialog({
           Draft reminder
         </Button>
         <FormError message={reminder.error ? describeError(reminder.error) : null} />
+        {/* Keyed by message text so a different draft remounts ReminderDraft and resets its editable copy. */}
         {reminder.data && <ReminderDraft key={reminder.data.message} reminder={reminder.data} />}
       </div>
     </Dialog>

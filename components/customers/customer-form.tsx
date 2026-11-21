@@ -102,10 +102,13 @@ export function CustomerFormDialog({
 
   return (
     <Dialog open={open} onClose={onClose} title={customer ? "Edit customer" : "New customer"}>
+      {/* noValidate turns off native browser bubbles, so zod messages and mapped server field errors are the only error text. */}
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        {/* Name is the only required field and takes initial focus; aria-invalid turns the control's ring red. */}
         <Field label="Name" error={errors.name?.message}>
           {(id, d) => <Input id={id} aria-describedby={d} aria-invalid={!!errors.name} autoFocus {...form.register("name")} />}
         </Field>
+        {/* inputMode="tel" only picks a phone keypad (no format check); with noValidate, type="email" affects keyboard and autofill while zod does the checking. */}
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Phone" error={errors.phone?.message}>
             {(id, d) => <Input id={id} aria-describedby={d} inputMode="tel" {...form.register("phone")} />}
@@ -114,13 +117,16 @@ export function CustomerFormDialog({
             {(id, d) => <Input id={id} aria-describedby={d} aria-invalid={!!errors.email} type="email" {...form.register("email")} />}
           </Field>
         </div>
+        {/* Address and notes are optional; clean() sends blanks as null, which on edit clears the stored value. */}
         <Field label="Address" error={errors.address?.message}>
           {(id) => <Textarea id={id} className="min-h-16" {...form.register("address")} />}
         </Field>
         <Field label="Notes" error={errors.notes?.message}>
           {(id) => <Textarea id={id} className="min-h-16" {...form.register("notes")} />}
         </Field>
+        {/* The banner skips every VALIDATION_ERROR (those go to inputs via setError), so one naming no known input is not shown; other failures such as network or timeout errors appear here. */}
         <FormError message={mutation.error && !(mutation.error instanceof ApiError && mutation.error.code === "VALIDATION_ERROR") ? describeError(mutation.error) : null} />
+        {/* Button's loading state disables submit while the request is in flight, preventing a double create. */}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
           <Button type="submit" loading={mutation.isPending}>{customer ? "Save" : "Add customer"}</Button>

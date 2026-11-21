@@ -58,20 +58,17 @@ export function ForecastChart({ points, threshold, height = 320, compact }: { po
     outflow: -chartNumber(p.outflow),
     raw: p,
   }));
-  // Accessibility: the SVG plot is aria-hidden; screen readers get the sr-only figcaption and (outside
-  // compact mode) the "View as table" data table. The table lists only dates with a non-zero inflow or
-  // outflow, plus the first and last point, to keep a 90-day daily series readable.
-  // Rendering: axis ticks use compact ₹K/L/Cr labels (display only); the tooltip maps each series name
-  // back to the exact string on `raw`, so outflow shows as the positive amount the API sent. The balance
-  // is a stepAfter area, holding each value until the next point.
   return (
     <figure>
+      {/* The SVG plot is aria-hidden; screen readers get the sr-only figcaption and, outside compact mode, the "View as table" data table. */}
       <div style={{ height }} aria-hidden="true">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="#e2dbc6" strokeDasharray="3 3" vertical={false} />
             <XAxis dataKey="date" tickFormatter={formatShortDate} tick={{ fill: "#55606f", fontSize: 11 }} minTickGap={24} />
+            {/* Y ticks use approximate floating-point ₹K/L/Cr labels (formatMoneyCompact); they are for orientation only. */}
             <YAxis tickFormatter={formatMoneyCompact} tick={{ fill: "#55606f", fontSize: 11 }} width={64} />
+            {/* The tooltip maps each series name back to the exact decimal string on `raw`, so outflow shows as the positive amount the API sent. */}
             <Tooltip
               contentStyle={{ borderRadius: 12, border: "1px solid #e2dbc6", background: "#fbf9f1" }}
               labelFormatter={(l) => formatDate(String(l))}
@@ -89,7 +86,9 @@ export function ForecastChart({ points, threshold, height = 320, compact }: { po
             )}
             {!compact && <Bar dataKey="inflow" fill={COLORS.inflow} barSize={6} radius={[3, 3, 0, 0]} />}
             {!compact && <Bar dataKey="outflow" fill={COLORS.outflow} barSize={6} radius={[0, 0, 3, 3]} />}
+            {/* stepAfter holds each projected balance flat until the next point instead of interpolating between dates. */}
             <Area type="stepAfter" dataKey="balance" stroke={COLORS.balance} strokeWidth={2} fill={COLORS.balance} fillOpacity={0.12} />
+            {/* Drawn only when the caller passes a threshold; chartNumber converts the decimal string purely to position the line. */}
             {threshold !== undefined && (
               <ReferenceLine y={chartNumber(threshold)} stroke={COLORS.threshold} strokeDasharray="4 4" label={{ value: "Shortfall line", fill: COLORS.threshold, fontSize: 11, position: "insideBottomRight" }} />
             )}
@@ -113,6 +112,7 @@ export function ForecastChart({ points, threshold, height = 320, compact }: { po
                 </tr>
               </thead>
               <tbody>
+                {/* Only dates with a non-zero inflow or outflow, plus the first and last point, keep a 90-day daily series readable; cells format the original strings. */}
                 {points
                   .filter((p) => p.inflow !== "0.00" || p.outflow !== "0.00" || p === points[0] || p === points[points.length - 1])
                   .map((p) => (
@@ -141,16 +141,16 @@ export function ForecastChart({ points, threshold, height = 320, compact }: { po
 export function SimulationChart({ points, threshold }: { points: Schemas["SimulationPointOut"][]; threshold?: string }) {
   // Same pattern as ForecastChart: numbers for geometry, `raw` strings for the tooltip.
   const data = points.map((p) => ({ date: p.date, baseline: chartNumber(p.baseline_balance), simulated: chartNumber(p.simulated_balance), raw: p }));
-  // Both series are stepAfter lines without dots; the tooltip labels each value as "projected" or
-  // "hypothetical" so the two are never read as the same kind of figure.
   return (
     <figure>
+      {/* Same accessibility pattern as ForecastChart: the plot is aria-hidden and the figcaption points to the page's comparison table. */}
       <div style={{ height: 320 }} aria-hidden="true">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="#e2dbc6" strokeDasharray="3 3" vertical={false} />
             <XAxis dataKey="date" tickFormatter={formatShortDate} tick={{ fill: "#55606f", fontSize: 11 }} minTickGap={24} />
             <YAxis tickFormatter={formatMoneyCompact} tick={{ fill: "#55606f", fontSize: 11 }} width={64} />
+            {/* The tooltip labels each value "projected" or "hypothetical" so the two are never read as the same kind of figure. */}
             <Tooltip
               contentStyle={{ borderRadius: 12, border: "1px solid #e2dbc6", background: "#fbf9f1" }}
               labelFormatter={(l) => formatDate(String(l))}
@@ -162,6 +162,7 @@ export function SimulationChart({ points, threshold }: { points: Schemas["Simula
               }}
             />
             <Legend formatter={(v) => (v === "baseline" ? "Baseline (projected)" : "Simulated (hypothetical)")} />
+            {/* Both series are stepAfter lines without dots; the simulated one is dashed in the separate "simulated" colour. */}
             <Line type="stepAfter" dataKey="baseline" stroke={COLORS.balance} strokeWidth={2} dot={false} />
             <Line type="stepAfter" dataKey="simulated" stroke={COLORS.simulated} strokeWidth={2} strokeDasharray="6 4" dot={false} />
             {threshold !== undefined && <ReferenceLine y={chartNumber(threshold)} stroke={COLORS.threshold} strokeDasharray="4 4" />}

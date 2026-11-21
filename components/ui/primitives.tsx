@@ -46,6 +46,7 @@ export function Button({ variant = "primary", size = "md", loading, className, c
         className,
       )}
     >
+      {/* The spinner is decorative (aria-hidden); assistive tech gets the busy state from aria-busy on this button. */}
       {loading && <Spinner className="size-4" />}
       {children}
     </button>
@@ -137,6 +138,7 @@ export function Stat({ label, value, hint, tone, href }: { label: string; value:
   );
   return href ? (
     <Link href={href} className="block min-w-0 rounded-[var(--radius-card)] bg-paper p-5 shadow-[var(--shadow-card)] ring-1 ring-line/70 transition hover:ring-steel/40">
+      {/* A link cannot be a Card <section>, so this repeats Card's surface classes; the whole tile is one link target. */}
       {body}
     </Link>
   ) : (
@@ -163,6 +165,7 @@ export function Skeleton({ className }: { className?: string }) {
 export function LoadingBlock({ label = "Loading…", rows = 3 }: { label?: string; rows?: number }) {
   return (
     <div role="status" aria-live="polite" className="space-y-3">
+      {/* Polite live region: the label is announced without interrupting, and the Skeleton rows are aria-hidden. */}
       <span className="sr-only">{label}</span>
       {Array.from({ length: rows }, (_, i) => (
         <Skeleton key={i} className="h-10 w-full" />
@@ -194,6 +197,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
     <div role="alert" className="rounded-xl bg-danger-soft px-4 py-3 text-sm text-danger ring-1 ring-danger/20">
       <p className="font-semibold">{code === "BACKEND_UNAVAILABLE" ? "KAIRA server unreachable" : "Could not load this"}</p>
       <p className="mt-0.5">{message}</p>
+      {/* Retry renders only when the caller passes one (usually a query refetch); type="button" keeps it from submitting an enclosing form. */}
       {onRetry && (
         <button type="button" onClick={onRetry} className="mt-2 font-semibold underline underline-offset-2">
           Try again

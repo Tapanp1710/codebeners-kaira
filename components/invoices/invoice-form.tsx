@@ -120,14 +120,9 @@ export function InvoiceForm() {
     }
   }
 
-  // Layout: items card on the left, sticky estimate/submit card on the right (xl screens).
-  // `noValidate` turns off native browser bubbles so Zod messages are the single source of errors;
-  // Field wires each message to its input via aria-describedby. The remove button is disabled when only
-  // one line remains, matching the schema's "at least one item" rule.
-  // The summary FormError hides a VALIDATION_ERROR that produced field errors (to avoid a duplicate
-  // message) and shows every other failure (network, timeout, business-rule rejections).
   return (
     <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="grid gap-6 xl:grid-cols-[2fr_1fr]">
+      {/* Layout: items card on the left, sticky estimate/submit card on the right on xl screens. noValidate keeps zod as the single source of error messages. */}
       <Card className="space-y-5">
         <div className="grid gap-4 sm:grid-cols-3">
           <Field label="Customer" error={errors.customer_id?.message} className="sm:col-span-3">
@@ -164,6 +159,7 @@ export function InvoiceForm() {
                   <Field label="Unit price (₹)" error={e?.unit_price?.message} hint={lines[index] ? <>Line ≈ <Money value={lines[index]} /></> : undefined}>
                     {(id, d) => <Input id={id} aria-describedby={d} inputMode="decimal" {...form.register(`items.${index}.unit_price`)} />}
                   </Field>
+                  {/* Disabled at one line, matching the schema's "at least one item" rule; the icon-only button's aria-label names the line it removes. */}
                   <Button type="button" variant="ghost" size="sm" className="sm:mt-6" onClick={() => remove(index)} disabled={fields.length === 1} aria-label={`Remove item ${index + 1}`}>
                     <Trash2 className="size-4" aria-hidden="true" />
                   </Button>
@@ -171,6 +167,7 @@ export function InvoiceForm() {
               );
             })}
           </div>
+          {/* Array-level zod errors such as "Add at least one item" are reported on items.root, not on a line. */}
           {errors.items?.root?.message && <p className="mt-2 text-xs text-danger">{errors.items.root.message}</p>}
           <Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => append({ description: "", quantity: "1", unit_price: "" })}>
             <Plus className="size-4" aria-hidden="true" /> Add item
@@ -181,11 +178,13 @@ export function InvoiceForm() {
       </Card>
 
       <Card className="h-fit space-y-4 xl:sticky xl:top-24">
+        {/* Display-only BigInt estimate of the lines that are valid so far; the backend computes the official total on save. */}
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">Estimated total</p>
           <p className="num mt-1 font-display text-3xl font-semibold" data-testid="invoice-estimate"><Money value={estimate} /></p>
           <p className="mt-1 text-xs text-muted">For convenience only. KAIRA calculates the official total from the items when you save.</p>
         </div>
+        {/* Shows every failure except a VALIDATION_ERROR with field errors; as only customer_id, invoice_date, due_date and notes are mapped onto inputs, item-only server errors are currently not displayed. */}
         <FormError message={create.error && !(create.error instanceof ApiError && create.error.code === "VALIDATION_ERROR" && Object.keys(create.error.fieldErrors()).length) ? describeError(create.error) : null} />
         <Button type="submit" size="lg" className="w-full" loading={create.isPending}>Create invoice</Button>
       </Card>

@@ -96,14 +96,11 @@ export function PaymentDialog({ invoice, open, onClose }: { invoice: Invoice; op
     }
   }
 
-  // Two views: the confirmation (after success) or the entry form. In the confirmation,
-  // `confirmed.replayed` is set by the backend when the key matched an already-recorded payment.
-  // "Pay full balance" copies the outstanding string verbatim into the amount field.
-
   return (
     <Dialog open={open} onClose={close} title={`Record payment · ${invoice.invoice_number}`} description={<>Outstanding now <Money value={invoice.outstanding} className="font-semibold text-ink" /></>}>
       {confirmed ? (
         <div className="space-y-4" data-testid="payment-confirmed">
+          {/* Confirmation view built from the server response (new outstanding and payment_status); `replayed` is set when the key matched an already-recorded payment. */}
           <Notice tone="good" title="Payment recorded">
             <Money value={confirmed.payment.amount} /> received on {confirmed.payment.payment_date}. Outstanding balance is now{" "}
             <Money value={confirmed.invoice.outstanding} className="font-semibold" /> ({confirmed.invoice.payment_status.replace("_", " ")}).
@@ -113,6 +110,7 @@ export function PaymentDialog({ invoice, open, onClose }: { invoice: Invoice; op
         </div>
       ) : (
         <form onSubmit={onSubmit} noValidate className="space-y-4">
+          {/* Entry view: noValidate, so the amount is checked only by validatePaymentAmount (exact string comparison against outstanding). */}
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Amount (₹)" error={amountError ?? undefined}>
               {(id, d) => (
@@ -133,9 +131,11 @@ export function PaymentDialog({ invoice, open, onClose }: { invoice: Invoice; op
             <Field label="Reference (optional)" hint="UPI ref, cheque no.">{(id, d) => <Input id={id} aria-describedby={d} value={reference} onChange={(e) => setReference(e.target.value)} />}</Field>
           </div>
           <Field label="Notes (optional)">{(id) => <Textarea id={id} className="min-h-16" value={notes} onChange={(e) => setNotes(e.target.value)} />}</Field>
+          {/* Copies the outstanding string verbatim (no float round-trip) and marks the field touched so validation shows at once. */}
           <button type="button" className="text-sm font-semibold text-steel underline underline-offset-2" onClick={() => { setAmount(invoice.outstanding); setTouched(true); }}>
             Pay full balance (<Money value={invoice.outstanding} />)
           </button>
+          {/* Network/timeout errors and API rejections (including the backend's own overpayment check) show here; close() clears them via record.reset(). */}
           <FormError message={record.error ? describeError(record.error) : null} />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={close}>Cancel</Button>
