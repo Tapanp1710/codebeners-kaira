@@ -28,26 +28,26 @@ class PaymentResult:
     created: bool  # False when an idempotent replay returned the original payment
 
 
-def _key_reused() -> BusinessRuleError:
+def key_reused_error() -> BusinessRuleError:
     return BusinessRuleError(
         "IDEMPOTENCY_KEY_REUSED",
         "This idempotency key was already used for a payment with different details.",
     )
 
 
-def _payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> Payment | None:
+def payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> Payment | None:
     return db.scalar(
         select(Payment).where(Payment.business_id == business_id, Payment.idempotency_key == key)
     )
 
 
-def _bill_payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> BillPayment | None:
+def bill_payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> BillPayment | None:
     return db.scalar(
         select(BillPayment).where(BillPayment.business_id == business_id, BillPayment.idempotency_key == key)
     )
 
 
-def _check_method(method: str) -> str:
+def check_method(method: str) -> str:
     if method not in PAYMENT_METHODS:
         raise ValidationAppError(
             f"Unsupported payment method '{method}'.", {"allowed": list(PAYMENT_METHODS)}
@@ -72,7 +72,7 @@ def record_customer_payment(
     amount = q2(amount)
     if amount <= ZERO:
         raise ValidationAppError("Payment amount must be greater than zero.")
-    _check_method(payment_method)
+    check_method(payment_method)
 
     # Serialise concurrent payments against the same invoice.
     invoice = db.scalar(
@@ -115,13 +115,13 @@ def record_customer_payment(
                 notes=notes,
             )
         if mismatch:
-            raise _key_reused()
+            raise key_reused_error()
         return PaymentResult(existing, created=False)
 
     # The key is looked up before the void / already-paid / overpayment checks, so an exact retry
     # replays even after the original payment cleared the invoice.
     if idempotency_key:
-        existing = _payment_by_key(db, actor.business_id, idempotency_key)
+        existing = payment_by_key(db, actor.business_id, idempotency_key)
         if existing is not None:
             return replay_or_conflict(existing)
 
@@ -160,7 +160,7 @@ def record_customer_payment(
             db.add(payment)
             db.flush()
     except IntegrityError:
-        existing = _payment_by_key(db, actor.business_id, idempotency_key) if idempotency_key else None
+        existing = payment_by_key(db, actor.business_id, idempotency_key) if idempotency_key else None
         if existing is None:
             raise
         return replay_or_conflict(existing)
@@ -260,7 +260,7 @@ def record_bill_payment(
     amount = q2(amount)
     if amount <= ZERO:
         raise ValidationAppError("Payment amount must be greater than zero.")
-    _check_method(payment_method)
+    check_method(payment_method)
     bill = db.scalar(
         select(Bill).where(Bill.id == bill_id, Bill.business_id == actor.business_id).with_for_update()
     )
@@ -293,12 +293,12 @@ def record_bill_payment(
                 notes=None,
             )
         if mismatch:
-            raise _key_reused()
+            raise key_reused_error()
         return existing, False
 
     # Key lookup precedes the already-paid / overpayment checks so an exact retry always replays.
     if idempotency_key:
-        existing = _bill_payment_by_key(db, actor.business_id, idempotency_key)
+        existing = bill_payment_by_key(db, actor.business_id, idempotency_key)
         if existing is not None:
             return replay_or_conflict(existing)
     today = business_today(actor.business.timezone)
@@ -328,7 +328,7 @@ def record_bill_payment(
             db.add(bp)
             db.flush()
     except IntegrityError:
-        existing = _bill_payment_by_key(db, actor.business_id, idempotency_key) if idempotency_key else None
+        existing = bill_payment_by_key(db, actor.business_id, idempotency_key) if idempotency_key else None
         if existing is None:
             raise
         return replay_or_conflict(existing)

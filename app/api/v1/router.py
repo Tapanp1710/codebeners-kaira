@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     finance,
     health,
     invoices,
+    payment_attempts,
     voice,
 )
 
@@ -21,6 +22,7 @@ api_router.include_router(business.router)
 api_router.include_router(customers.router)
 api_router.include_router(invoices.router)
 api_router.include_router(bills.router)
+api_router.include_router(payment_attempts.router)
 api_router.include_router(commitments.router)
 api_router.include_router(finance.router)
 api_router.include_router(voice.router)

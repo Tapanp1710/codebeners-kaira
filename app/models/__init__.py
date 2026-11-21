@@ -7,6 +7,7 @@ from app.models.cash import CashTransaction
 from app.models.conversation import Conversation, ProposedAction
 from app.models.customer import Customer, PaymentCommitment
 from app.models.invoice import Invoice, InvoiceItem, Payment
+from app.models.payment_attempt import PaymentAttempt
 
 __all__ = [
     "AuditLog",
@@ -19,6 +20,7 @@ __all__ = [
     "Invoice",
     "InvoiceItem",
     "Payment",
+    "PaymentAttempt",
     "PaymentCommitment",
     "ProposedAction",
     "RefreshToken",

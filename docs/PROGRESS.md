@@ -34,3 +34,5 @@ Based on `docs/backend-comment-annotations` (`b40315e`), which preserves comment
 |---|---|---|
 | Baseline | 120 tests pass on PostgreSQL, ruff check/format clean | local run |
 | B1 Request fingerprints | Done: SHA-256 of canonical request on `payments` and `bill_payments` (migration `6b1d2e8f4a10`); exact retry replays, any changed field is 422 `IDEMPOTENCY_KEY_REUSED`; legacy rows compared column-by-column; unique-key races resolved through a savepoint | `tests/api/test_payment_idempotency.py` (26 tests, real PostgreSQL, incl. concurrency) |
+| B2 Payment-attempt registry | Done: `payment_attempts` table (migration `d50345d81159`), `/api/v1/payment-attempts` register/list/get/execute/cancel, state machine in docs/PAYMENT_ATTEMPTS.md | — |
+| B3 Recovery tests | Done: 22 PostgreSQL tests (other device, server restart, crash before commit, full payment replay, isolation, concurrency, cancellation races). Suite 168 passed; `alembic check` clean | `tests/api/test_payment_attempts.py` |
