@@ -44,6 +44,8 @@ class BillPayment(UUIDPrimaryKey, CreatedAt, Base):
     payment_method: Mapped[str] = mapped_column(String(30), default="cash")
     reference: Mapped[str | None] = mapped_column(String(200))
     idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    # SHA-256 of the canonical request (app/services/idempotency.py); NULL for rows recorded before it existed.
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),

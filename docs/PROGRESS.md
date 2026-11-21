@@ -24,3 +24,13 @@
 ## Resume checklist
 
 `git status`, read this file and INTEGRATION_STATUS.md, `docker compose up -d db`, `scripts/verify`.
+
+## Payment integrity and recovery (branch `feat/payment-integrity`, 2026-11-22)
+
+Based on `docs/backend-comment-annotations` (`b40315e`), which preserves comment-only edits found uncommitted on
+`feat/kaira-backend` (verified code-identical to `357bc56` by AST comparison).
+
+| Step | Status | Evidence |
+|---|---|---|
+| Baseline | 120 tests pass on PostgreSQL, ruff check/format clean | local run |
+| B1 Request fingerprints | Done: SHA-256 of canonical request on `payments` and `bill_payments` (migration `6b1d2e8f4a10`); exact retry replays, any changed field is 422 `IDEMPOTENCY_KEY_REUSED`; legacy rows compared column-by-column; unique-key races resolved through a savepoint | `tests/api/test_payment_idempotency.py` (26 tests, real PostgreSQL, incl. concurrency) |

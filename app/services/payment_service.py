@@ -9,11 +9,12 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessRuleError, NotFoundError, ValidationAppError
 from app.models import Bill, BillPayment, CashTransaction, Customer, Invoice, Payment, PaymentCommitment
-from app.services import audit_service, ledger
+from app.services import audit_service, idempotency, ledger
 from app.utils.dates import business_today
 from app.utils.money import ZERO, money_str, q2
 from app.utils.serialize import snapshot
@@ -25,6 +26,25 @@ PAYMENT_METHODS = ("cash", "upi", "bank_transfer", "cheque", "card", "other")
 class PaymentResult:
     payment: Payment
     created: bool  # False when an idempotent replay returned the original payment
+
+
+def _key_reused() -> BusinessRuleError:
+    return BusinessRuleError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "This idempotency key was already used for a payment with different details.",
+    )
+
+
+def _payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> Payment | None:
+    return db.scalar(
+        select(Payment).where(Payment.business_id == business_id, Payment.idempotency_key == key)
+    )
+
+
+def _bill_payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> BillPayment | None:
+    return db.scalar(
+        select(BillPayment).where(BillPayment.business_id == business_id, BillPayment.idempotency_key == key)
+    )
 
 
 def _check_method(method: str) -> str:
@@ -67,19 +87,43 @@ def record_customer_payment(
             "INVOICE_CUSTOMER_MISMATCH", "This invoice does not belong to the selected customer."
         )
 
-    if idempotency_key:
-        existing = db.scalar(
-            select(Payment).where(
-                Payment.business_id == actor.business_id, Payment.idempotency_key == idempotency_key
-            )
+    # The fingerprint covers every field that affects the operation (app/services/idempotency.py).
+    fp = idempotency.fingerprint(
+        idempotency.canonical_payment(
+            business_id=actor.business_id,
+            operation="invoice_payment",
+            target_id=invoice.id,
+            amount=amount,
+            payment_date=payment_date,
+            payment_method=payment_method,
+            reference=reference,
+            notes=notes,
         )
+    )
+
+    def replay_or_conflict(existing: Payment) -> PaymentResult:
+        if existing.request_fingerprint is not None:
+            mismatch = existing.request_fingerprint != fp
+        else:
+            mismatch = idempotency.legacy_mismatch(
+                existing,
+                target_matches=existing.invoice_id == invoice.id,
+                amount=amount,
+                payment_date=payment_date,
+                payment_method=payment_method,
+                reference=reference,
+                notes=notes,
+            )
+        if mismatch:
+            raise _key_reused()
+        return PaymentResult(existing, created=False)
+
+    # The key is looked up before the void / already-paid / overpayment checks, so an exact retry
+    # replays even after the original payment cleared the invoice.
+    if idempotency_key:
+        existing = _payment_by_key(db, actor.business_id, idempotency_key)
         if existing is not None:
-            if existing.invoice_id != invoice.id or existing.amount != amount:
-                raise BusinessRuleError(
-                    "IDEMPOTENCY_KEY_REUSED",
-                    "This idempotency key was already used for a different payment.",
-                )
-            return PaymentResult(existing, created=False)
+            return replay_or_conflict(existing)
 
     if invoice.lifecycle_status == "void":
         raise BusinessRuleError("INVOICE_VOID", "Payments cannot be recorded on a void invoice.")
@@ -106,9 +150,20 @@ def record_customer_payment(
         reference=reference,
         notes=notes,
         idempotency_key=idempotency_key,
+        request_fingerprint=fp,
         source_action_id=source_action_id,
     )
-    db.add(payment)
+    # Savepoint: a concurrent request with the same key on another invoice (different row lock) can win
+    # the unique index first. Resolve that as a replay or a conflict instead of a generic 409.
+    try:
+        with db.begin_nested():
+            db.add(payment)
+            db.flush()
+    except IntegrityError:
+        existing = _payment_by_key(db, actor.business_id, idempotency_key) if idempotency_key else None
+        if existing is None:
+            raise
+        return replay_or_conflict(existing)
     db.flush()
     customer_name = db.scalar(select(Customer.name).where(Customer.id == invoice.customer_id))
     db.add(
@@ -211,20 +266,41 @@ def record_bill_payment(
     )
     if bill is None:
         raise NotFoundError("Bill not found.")
-    if idempotency_key:
-        existing = db.scalar(
-            select(BillPayment).where(
-                BillPayment.business_id == actor.business_id,
-                BillPayment.idempotency_key == idempotency_key,
-            )
+    fp = idempotency.fingerprint(
+        idempotency.canonical_payment(
+            business_id=actor.business_id,
+            operation="bill_payment",
+            target_id=bill.id,
+            amount=amount,
+            payment_date=payment_date,
+            payment_method=payment_method,
+            reference=reference,
+            notes=None,  # bill payments have no notes field
         )
+    )
+
+    def replay_or_conflict(existing: BillPayment) -> tuple[BillPayment, bool]:
+        if existing.request_fingerprint is not None:
+            mismatch = existing.request_fingerprint != fp
+        else:
+            mismatch = idempotency.legacy_mismatch(
+                existing,
+                target_matches=existing.bill_id == bill.id,
+                amount=amount,
+                payment_date=payment_date,
+                payment_method=payment_method,
+                reference=reference,
+                notes=None,
+            )
+        if mismatch:
+            raise _key_reused()
+        return existing, False
+
+    # Key lookup precedes the already-paid / overpayment checks so an exact retry always replays.
+    if idempotency_key:
+        existing = _bill_payment_by_key(db, actor.business_id, idempotency_key)
         if existing is not None:
-            if existing.bill_id != bill.id or existing.amount != amount:
-                raise BusinessRuleError(
-                    "IDEMPOTENCY_KEY_REUSED",
-                    "This idempotency key was already used for a different payment.",
-                )
-            return existing, False
+            return replay_or_conflict(existing)
     today = business_today(actor.business.timezone)
     bal = ledger.bill_balances(db, actor.business_id, today, bill_ids=[bill.id])[0]
     if bal.outstanding <= ZERO:
@@ -244,9 +320,18 @@ def record_bill_payment(
         payment_method=payment_method,
         reference=reference,
         idempotency_key=idempotency_key,
+        request_fingerprint=fp,
     )
-    db.add(bp)
-    db.flush()
+    # Savepoint: see record_customer_payment.
+    try:
+        with db.begin_nested():
+            db.add(bp)
+            db.flush()
+    except IntegrityError:
+        existing = _bill_payment_by_key(db, actor.business_id, idempotency_key) if idempotency_key else None
+        if existing is None:
+            raise
+        return replay_or_conflict(existing)
     db.add(
         CashTransaction(
             business_id=actor.business_id,

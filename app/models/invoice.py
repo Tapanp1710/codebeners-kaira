@@ -69,6 +69,8 @@ class Payment(UUIDPrimaryKey, CreatedAt, Base):
     reference: Mapped[str | None] = mapped_column(String(200))
     notes: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    # SHA-256 of the canonical request (app/services/idempotency.py); NULL for rows recorded before it existed.
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
     source_action_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("proposed_actions.id", ondelete="SET NULL")
     )
