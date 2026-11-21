@@ -1,5 +1,13 @@
 "use client";
 
+/**
+ * MediaRecorder wrapper for the voice orb (components/voice/assistant-panel.tsx).
+ *
+ * Produces one audio Blob per recording and hands it to `onComplete`; the panel then uploads it with
+ * transcribe() in lib/api/voice.ts. Browser capability and permission failures are mapped to a small set
+ * of RecorderError codes with user-facing messages that always offer typing as a fallback.
+ * Microphone access also depends on the Permissions-Policy set in next.config.ts (microphone=(self)).
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export const MAX_RECORDING_SECONDS = 30; // Sarvam synchronous STT limit (contracts/API_CONTRACT.md)
@@ -21,6 +29,9 @@ export const RECORDER_MESSAGES: Record<RecorderError, string> = {
   empty_recording: "Nothing was recorded. Hold the orb a little longer while you speak.",
 };
 
+// First container the browser can record, in order of preference (Chrome/Firefox: WebM/Opus; Safari: MP4).
+// undefined lets MediaRecorder choose its own default. The resulting MIME type also decides the upload
+// file extension in transcribe().
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   for (const type of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]) {
@@ -32,20 +43,26 @@ function pickMimeType(): string | undefined {
 /**
  * Explicit, user-initiated recording only. The microphone stream is released as soon as recording
  * stops; nothing listens in the background.
+ *
+ * Returns { status, error, seconds, start, stop, reset }. `start` is meant to be wired to a tap on the orb;
+ * recording ends on `stop()` or automatically at MAX_RECORDING_SECONDS.
  */
 export function useRecorder(onComplete: (audio: Blob) => void) {
   const [status, setStatus] = useState<RecorderStatus>("idle");
   const [error, setError] = useState<RecorderError | null>(null);
   const [seconds, setSeconds] = useState(0);
+  // Refs hold the live recorder/stream/chunks so event handlers never read stale React state.
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Latest onComplete, so recorder.onstop (bound when recording started) calls the current callback.
   const completeRef = useRef(onComplete);
   useEffect(() => {
     completeRef.current = onComplete;
   }, [onComplete]);
 
+  // Stops the elapsed-time timer and every microphone track (turns off the browser's recording indicator).
   const release = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;
@@ -53,6 +70,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
     streamRef.current = null;
   }, []);
 
+  // Unmount cleanup: never leave the microphone open if the component goes away mid-recording.
   useEffect(() => release, [release]);
 
   const fail = useCallback(
@@ -64,6 +82,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
     [release],
   );
 
+  // Safe to call repeatedly: only an active recorder is stopped; the Blob is assembled in onstop.
   const stop = useCallback(() => {
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") rec.stop();
@@ -71,6 +90,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
 
   const start = useCallback(async () => {
     setError(null);
+    // Feature detection: getUserMedia is also missing on insecure (non-HTTPS, non-localhost) origins.
     if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       fail("unsupported");
       return;
@@ -80,6 +100,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
+      // Map getUserMedia DOMException names to user-facing reasons.
       const name = (err as DOMException)?.name;
       fail(name === "NotAllowedError" || name === "SecurityError" ? "permission_denied" : name === "NotFoundError" ? "no_microphone" : "recording_failed");
       return;
@@ -102,6 +123,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
     recorder.onstop = () => {
       release();
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
+      // Under ~200 bytes there is effectively no audio (e.g. an immediate second tap); don't upload it.
       if (blob.size < 200) {
         fail("empty_recording");
         return;
@@ -109,9 +131,12 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
       setStatus("idle");
       completeRef.current(blob);
     };
+    // 250 ms timeslice: data arrives in small chunks while recording instead of one chunk at stop.
     recorder.start(250);
     setSeconds(0);
     setStatus("recording");
+    // Elapsed-seconds counter that also enforces the provider limit. stop() is called from inside the
+    // state updater; that is harmless if the updater runs twice because stop() ignores an inactive recorder.
     timerRef.current = setInterval(() => {
       setSeconds((s) => {
         if (s + 1 >= MAX_RECORDING_SECONDS) stop();
@@ -120,6 +145,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
     }, 1000);
   }, [fail, release, stop]);
 
+  // Clears an error so the orb returns to idle; does not touch the microphone.
   const reset = useCallback(() => {
     setError(null);
     setStatus("idle");

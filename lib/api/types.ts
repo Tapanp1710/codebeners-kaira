@@ -1,9 +1,13 @@
 /** Aliases over the generated contract types (lib/api/schema.d.ts - do not edit that file by hand). */
+// schema.d.ts is produced by openapi-typescript from contracts/openapi.json (npm run contract:generate),
+// so these aliases change automatically when the backend contract is re-imported. Type-only: no runtime code.
 import type { components, paths } from "./schema";
 
+// `paths` drives the typed openapi-fetch client in lib/api/client.ts (URLs, params and bodies are checked).
 export type { paths };
 export type Schemas = components["schemas"];
 
+// Friendly names for the response models the UI uses most.
 export type Session = Schemas["SessionOut"];
 export type Customer = Schemas["CustomerWithBalance"];
 export type CustomerDetail = Schemas["CustomerDetailOut"];
@@ -27,6 +31,7 @@ export type Answer = Schemas["AnswerOut"];
 export type Reminder = Schemas["ReminderOut"];
 export type Transcription = Schemas["TranscriptionOut"];
 export type Speech = Schemas["SpeechOut"];
+// Derived unions (pulled out of request models rather than declared separately, so they cannot drift).
 export type PaymentMethod = Schemas["PaymentCreate"]["payment_method"];
 export type LanguageCode = NonNullable<Schemas["ExtractRequest"]["language"]>;
 export type Intent = Schemas["Operation"]["type"];

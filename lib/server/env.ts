@@ -1,5 +1,14 @@
+/**
+ * Server-only configuration for reaching the KAIRA backend.
+ *
+ * Read by the proxy route handler (app/api/backend/[...path]/route.ts) and the server session check
+ * (lib/server/session.ts). The "server-only" import makes any client-component import a build error,
+ * so the backend address cannot leak into the browser bundle. Values are read from process.env on
+ * every call (not cached at module load).
+ */
 import "server-only";
 
+// Distinguishes configuration mistakes from other failures, so the route handler can show the message verbatim.
 export class FrontendConfigError extends Error {}
 
 /** Server-only backend origin (no trailing slash, no /api/v1). Never exposed to the browser. */
@@ -19,9 +28,11 @@ export function backendOrigin(): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new FrontendConfigError("BACKEND_ORIGIN must use http or https.");
   }
+  // Only scheme://host[:port] is kept; any path, query or trailing slash in the variable is discarded.
   return url.origin;
 }
 
+/** Default upstream timeout in ms: BACKEND_TIMEOUT_MS when it is a positive number, otherwise 30 s. */
 export function backendTimeoutMs(): number {
   const value = Number(process.env.BACKEND_TIMEOUT_MS);
   return Number.isFinite(value) && value > 0 ? value : 30_000;
