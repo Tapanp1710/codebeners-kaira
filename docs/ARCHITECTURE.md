@@ -50,29 +50,30 @@ contracts/                   imported backend contract + version record
   ledger-derived view (dashboard, insights, customers, invoices, receivables, forecast, bills, commitments, audit).
   Customer edits only refresh customer data.
 * Payments send an `Idempotency-Key` created once per submission and reused on retry.
-* **Payment recovery** for bill payments (`components/cashflow/bills-panel.tsx`) and invoice payments
-  (`components/invoices/payment-form.tsx`), both built on one shared store in `lib/api/payment-attempt.ts`:
-  * The first submit saves an *attempt* (the key plus the exact request body) to `localStorage`, before the request is
-    sent. The storage keys are `kaira:bill-payment-attempt:v1:<businessId>:<billId>` and
-    `kaira:invoice-payment-attempt:v1:<businessId>:<invoiceId>`. Each kind has its own lock and channel names.
-  * For invoices, the frozen body also includes the reference and notes. While a payment is pending, the invoice page
-    shows "Resolve payment" (even if the invoice now reads fully paid) and hides Void.
-  * The attempt is removed only when the backend confirms an outcome:
-    * success, whether newly recorded or replayed;
-    * a processed 4xx rejection, which means nothing was recorded.
-  * Network errors, timeouts, 5xx and 401/408/409/429 keep the attempt. The form locks and "Retry payment" resends the
-    same key and body.
-  * There is no discard action. Closing the dialog keeps the attempt, and the bill row then shows "Resolve payment".
-  * Attempts survive reloads, closed tabs and browser restarts, and are never overwritten.
-  * **Cross-tab:** submits for a bill run under a per-bill Web Lock and re-read storage inside the lock. Changes are
-    broadcast on a `BroadcastChannel`, with `storage` events as a fallback, so other tabs adopt a pending attempt or
-    close once it is confirmed. A 24 h completion marker lets them tell "confirmed" apart from "rejected".
-  * **Trade-offs:** the entry holds no tokens or credentials, only the key, ids, amount, date and method. It is
-    scoped to the business, so users of the same business share a bill's pending attempt; that sharing is what stops a
-    second person or tab from paying the bill again. It outlives logout on a shared device until the payment is
-    resolved. Attempts do not expire, because backend idempotency keys never expire and an old key can always be
-    replayed safely. If `localStorage` is blocked, attempts are kept in memory only, with no reload or cross-tab
-    recovery.
+* **Payment recovery: the server is the authority** (backend API 1.1.0, `/payment-attempts`):
+  * **Shared code.** Bill and invoice payments share `lib/payments/server-attempts.ts` (register, then execute, with
+    one outcome classification) and the `usePaymentAttempt` hook.
+  * **Register before paying.** A payment first registers an *attempt*; the backend freezes the key and the exact
+    request. The attempt is then executed, and executing it again is always safe: the backend records the payment
+    once or replays it.
+  * **Finding unconfirmed payments.** Any device lists them with `GET /payment-attempts?status=pending`. They
+    appear on the dashboard, the invoice list, receivables, the invoice page and the bills panel, on every page of
+    each list.
+  * **No discard, no new key.** An unconfirmed payment is never discarded and never gets a new key. Its fields are
+    frozen and "Retry payment" resends the same attempt. Closing the dialog keeps it.
+  * **Browser storage is only a recovery aid.** `lib/api/payment-attempt.ts` keeps `localStorage` records
+    (`kaira:{bill,invoice}-payment-attempt:v1:<businessId>:<id>`):
+    * They cover the moment between choosing a key and the server confirming the registration.
+    * Records written by builds before the registry (`v: 1`) are registered with their original key, so a payment
+      already recorded under it is linked rather than repeated.
+    * At logout, `v2` records are cleared (the server holds the attempt, or nothing happened), and `v1` records
+      are cleared only once registered. Server attempts are never cancelled by logout.
+  * **Concurrency.** Fresh submits re-check local storage and the server under a per-target Web Lock. Without Web
+    Locks, PostgreSQL's "one pending attempt per invoice or bill" rule decides: the second tab or device gets a 409
+    and adopts the first one's attempt. A BroadcastChannel (with `storage` events as a fallback) keeps open tabs in
+    step.
+  * **Limits.** Recovery works across devices, but only for users of the same business. The backend's per-user
+    write limit applies.
 * Money stays a decimal string. Display uses exact BigInt formatting with Indian digit grouping. The invoice form's
   running estimate uses exact arithmetic and is labelled as an estimate. Charts convert to numbers only for plotting,
   and their labels show the exact strings.

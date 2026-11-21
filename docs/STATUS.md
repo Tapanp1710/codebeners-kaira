@@ -1,4 +1,19 @@
-# Status (2026-11-21)
+# Status
+
+## 2026-11-22: server-side payment recovery (branch `feat/server-payment-recovery`)
+
+| Item | Result | How |
+|---|---|---|
+| Contract | API 1.1.0 from kaira-backend `578cede` (43 paths) | `npm run contract:check` |
+| Unit / component tests | 122 / 122 passed | `npm test` |
+| ESLint, TypeScript | 0 problems; passes | `npm run lint`, `npm run typecheck` |
+| Production build | succeeds | `npm run build` |
+| Playwright, full suite | **18 / 18 passed** (incl. `RUN_ACCEPTANCE=1`, cross-device recovery, the voice test) | disposable backend built from `feat/payment-integrity` and PostgreSQL |
+| PostgreSQL after E2E | 21 succeeded attempts, each linked to a payment with the same key in the same business; 0 duplicate payment keys; 0 duplicate cash movements; no overpaid invoice or bill | SQL |
+| Docker image | builds; container serves /login, proxied login, `/payment-attempts` through the proxy, 400 for a malformed path; runs as non-root `kaira` | `docker build`, `docker run` against the disposable backend |
+| Proxy hardening | malformed path: 500 → 400 envelope; double decoding: 200 → 404; browser forwarding headers no longer forwarded | probed on `next start`, plus unit tests |
+
+## 2026-11-21
 
 ## Verification
 
