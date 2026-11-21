@@ -77,5 +77,31 @@ JSON without secrets (httpx URL logging is silenced). The server header is disab
 
 ## Known limitations / follow-ups
 
-* No account self-service (password reset, user invitations). Users are created with `python -m app.cli create-owner` or by the seed.
+* No account self-service (password reset, user invitations): there is no e-mail service, and a reset or invite link
+  that cannot be delivered would be fake. Operators create accounts with `python -m app.cli create-owner` (new
+  business) and `python -m app.cli create-user --owner-email … --email … [--role staff]` (adds a user to an existing
+  owner's business; audited as `user.created`). Passwords are read from an environment variable or a prompt, never
+  from a CLI argument. When an e-mail provider is configured, add hashed single-use reset and invite tokens with
+  expiry and non-enumerating responses.
+* Access JWTs stay valid until they expire (15 min) after logout; refresh tokens are revoked immediately.
 * Dependency audit runs in CI (`pip-audit`). It was not run locally.
+
+## Security review, 2026-11-22 (`feat/payment-integrity`)
+
+Scope: authentication, sessions, cookies, CSRF, cross-business access, payment approval, idempotency, payment
+attempts, audit, provider secrets, logging, uploads, error responses and rate limiting.
+
+| Area | Finding | Status |
+|---|---|---|
+| Idempotency | A reused key with the same amount but different date, method, reference or notes replayed as success | **Fixed**: request fingerprints (DECISIONS #19) |
+| Rate limiting | Per-process counters with 2 workers doubled every limit, including login | **Fixed**: shared PostgreSQL limiter |
+| Cross-device recovery | Only the sending browser could resolve a lost payment | **Fixed**: payment-attempt registry (DECISIONS #20) |
+| Cross-business access (IDOR) | Every lookup by id is scoped by `business_id`, or follows an object that already is (reviewed every `db.get` / `select … id ==`). Payment attempts: other businesses get 404 (tested) | OK |
+| CSRF | Enforced for cookie sessions on every unsafe method (constant-time compare). Payment-attempt writes without the header get 403 (tested) | OK |
+| Passwords | argon2id; a dummy verify for unknown users equalises timing; ≥10 characters for CLI-created accounts | OK |
+| Sessions | HttpOnly cookies, `Secure` enforced in staging and production; the refresh cookie is path-scoped. Refresh tokens are single-use and rotate under a row lock; reuse revokes every session for that user | OK |
+| Approval | Owner-only (`OwnerAuth`); now also rate limited per user | OK |
+| Audit | Payments, bill payments, every attempt transition, logins and CLI user creation are audited. The application never updates or deletes audit rows. The database doesn't enforce append-only; a DB-level trigger is a possible hardening step | OK / note |
+| Secrets in logs | The Sarvam key is only ever sent as a request header and never logged. httpx URL logging is silenced. Request IDs from clients are validated (`^[A-Za-z0-9._-]{1,64}$`) | OK |
+| Error responses | One envelope; unhandled errors return a generic 500 with no stack trace or SQL. Database errors become 503 or 409 without driver text | OK |
+| Client IP trust | uvicorn trusts `X-Forwarded-For` only from `FORWARDED_ALLOW_IPS`. The frontend proxy must not pass through a browser-supplied value (see "Client IP") | Requirement on the frontend |

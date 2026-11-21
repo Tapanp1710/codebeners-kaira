@@ -3,9 +3,12 @@
 python -m app.cli check-config      validate .env and report problems
 python -m app.cli wait-db [--timeout 60]
 python -m app.cli migrate           apply Alembic migrations (alembic upgrade head)
-python -m app.cli seed              idempotent demo data (development only)
+python -m app.cli seed [--reset]    idempotent demo data (development only; --reset re-anchors dates to today)
 python -m app.cli create-owner --business "Name" --email you@x.com --name "You" [--opening-cash 0]
                                     first production account (password read from KAIRA_OWNER_PASSWORD
+                                    or prompted)
+python -m app.cli create-user --owner-email owner@x.com --email staff@x.com --name "Staff" [--role staff]
+                                    add a user to that owner's business (password from KAIRA_USER_PASSWORD
                                     or prompted)
 python -m app.cli export-openapi [path]
 """
@@ -177,6 +180,60 @@ def cmd_create_owner(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_create_user(args: argparse.Namespace) -> int:
+    """Adds a user (staff by default) to the business of an existing owner.
+
+    There is no e-mail service, so there are no self-service invitations or password resets; an operator
+    creates accounts here and hands the password over out of band. The business is chosen through an
+    existing OWNER's e-mail, so a typo cannot attach a user to an arbitrary business."""
+    from sqlalchemy import select
+
+    from app.core.security import hash_password
+    from app.models import User
+    from app.services import audit_service
+
+    password = os.environ.get("KAIRA_USER_PASSWORD") or getpass.getpass("User password (min 10 chars): ")
+    if len(password) < 10:
+        print("Password must be at least 10 characters.", file=sys.stderr)
+        return 2
+    db = _session()
+    try:
+        owner = db.scalar(select(User).where(User.email == args.owner_email.lower(), User.role == "owner"))
+        if owner is None:
+            print(f"No owner account {args.owner_email.lower()}; nothing changed.", file=sys.stderr)
+            return 2
+        existing = db.scalar(select(User).where(User.email == args.email.lower()))
+        if existing is not None:
+            if existing.business_id != owner.business_id:
+                print("That e-mail belongs to another business; nothing changed.", file=sys.stderr)
+                return 2
+            print("A user with that e-mail already exists in this business; nothing changed.")
+            return 0
+        user = User(
+            business_id=owner.business_id,
+            name=args.name,
+            email=args.email.lower(),
+            password_hash=hash_password(password),
+            role=args.role,
+        )
+        db.add(user)
+        db.flush()
+        audit_service.record(
+            db,
+            business_id=owner.business_id,
+            user_id=None,
+            action_type="user.created",
+            entity_type="user",
+            entity_id=user.id,
+            after={"email": user.email, "role": user.role, "via": "cli"},
+        )
+        db.commit()
+        print(f"Created {args.role} {user.email} in the business of {owner.email}")
+    finally:
+        db.close()
+    return 0
+
+
 def cmd_export_openapi(args: argparse.Namespace) -> int:
     from app.main import create_app
 
@@ -215,6 +272,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--opening-cash", default="0.00")
     p.add_argument("--opening-date", default=None, help="YYYY-MM-DD (default today)")
     p.set_defaults(func=cmd_create_owner)
+    p = sub.add_parser("create-user", help="add a staff (or owner) user to an existing owner's business")
+    p.add_argument("--owner-email", required=True)
+    p.add_argument("--email", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--role", choices=("staff", "owner"), default="staff")
+    p.set_defaults(func=cmd_create_user)
     p = sub.add_parser("export-openapi")
     p.add_argument("path", nargs="?", default="docs/openapi.json")
     p.set_defaults(func=cmd_export_openapi)

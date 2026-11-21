@@ -387,3 +387,16 @@ def test_concurrent_execute_and_cancel_never_lose_a_payment(owner, db, invoice):
         select(func.count()).select_from(PaymentAttempt).where(PaymentAttempt.status == "succeeded")
     )
     assert money_rows(db, Payment)[0] == succeeded
+
+
+def test_csrf_is_required_for_attempt_writes(owner, invoice):
+    a = register(owner, attempt_body("invoice", invoice["id"]))
+    c = owner.client
+    for path, body in (
+        ("/api/v1/payment-attempts", attempt_body("invoice", invoice["id"])),
+        (f"/api/v1/payment-attempts/{a['id']}/execute", None),
+        (f"/api/v1/payment-attempts/{a['id']}/cancel", None),
+    ):
+        r = c.post(path, json=body)  # cookie session, no X-CSRF-Token header
+        assert r.status_code == 403 and r.json()["error"]["code"] == "CSRF_FAILED", path
+    assert owner.data(owner.get(f"/payment-attempts/{a['id']}"))["status"] == "pending"
