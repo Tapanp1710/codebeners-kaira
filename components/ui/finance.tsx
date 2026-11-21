@@ -80,7 +80,7 @@ export function DataTable({ caption, children, className }: { caption: string; c
 }
 
 // Shared cell class strings for DataTable children; the *Num variants right-align numeric columns.
-export const th ="border-b border-line px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted first:pl-0 last:pr-0";
+export const th = "border-b border-line px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted first:pl-0 last:pr-0";
 export const td = "border-b border-line/60 px-3 py-3 align-top first:pl-0 last:pr-0";
 export const tdNum = cn(td, "text-right");
 export const thNum = cn(th, "text-right");

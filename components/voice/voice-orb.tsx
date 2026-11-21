@@ -11,7 +11,7 @@ import { Mic, Square } from "lucide-react";
 import { cn } from "@/components/ui/primitives";
 
 /** Visual states; AssistantPanel derives them from recorder status plus its own transcribe/extract/speak workflow. */
-export type OrbState ="idle" | "listening" | "processing" | "ready" | "speaking" | "error";
+export type OrbState = "idle" | "listening" | "processing" | "ready" | "speaking" | "error";
 
 /** Status text announced through the polite live region under the large orb. */
 export const ORB_LABEL: Record<OrbState, string> = {
