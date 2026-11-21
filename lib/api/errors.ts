@@ -33,14 +33,20 @@ export class ApiError extends Error {
    * Nested fields collapse onto their last segment (e.g. ["body","items",0,"quantity"] -> "quantity").
    */
   fieldErrors(): Record<string, string> {
+    return Object.fromEntries(this.fieldErrorsByPath().map((e) => [e.path.split(".").at(-1) ?? e.path, e.message]));
+  }
+
+  /**
+   * Validation errors with their full location, e.g. "items.1.quantity" or "customer_id" (the leading
+   * "body"/"query"/"path" segment is dropped). Keeps the line index that fieldErrors() loses.
+   */
+  fieldErrorsByPath(): { path: string; message: string }[] {
     const errors = (this.details as { errors?: { loc: (string | number)[]; msg: string }[] } | null)?.errors;
-    const out: Record<string, string> = {};
-    for (const e of errors ?? []) {
-      const key = String(e.loc[e.loc.length - 1]);
+    return (errors ?? []).map((e) => {
+      const loc = e.loc[0] === "body" || e.loc[0] === "query" || e.loc[0] === "path" ? e.loc.slice(1) : e.loc;
       // Strips the "Value error, " prefix Pydantic adds to custom validator messages.
-      out[key] = e.msg.replace(/^Value error, /, "");
-    }
-    return out;
+      return { path: loc.join("."), message: e.msg.replace(/^Value error, /, "") };
+    });
   }
 }
 

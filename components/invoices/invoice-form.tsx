@@ -53,6 +53,34 @@ type Values = z.infer<typeof invoiceSchema>;
  * New-invoice form. Optional `?customer=<id>` preselects the customer (used when starting an
  * invoice from a customer page). On success it toasts and navigates to the new invoice.
  */
+const FIELD_LABEL: Record<string, string> = {
+  customer_id: "Customer",
+  invoice_date: "Invoice date",
+  due_date: "Due date",
+  notes: "Notes",
+  items: "Items",
+  description: "Description",
+  quantity: "Quantity",
+  unit_price: "Unit price",
+};
+
+/**
+ * The server's own message, followed by every validation error it reported, each naming the line and
+ * field ("Item 2 – Quantity: …"). Nothing is suppressed, including errors that have no input to attach to.
+ */
+export function serverErrorSummary(error: unknown): string {
+  const base = describeError(error);
+  if (!(error instanceof ApiError)) return base;
+  const parts = error.fieldErrorsByPath().map(({ path, message }) => {
+    const item = /^items\.(\d+)\.(\w+)$/.exec(path);
+    const where = item
+      ? `Item ${Number(item[1]) + 1} – ${FIELD_LABEL[item[2]] ?? item[2]}`
+      : FIELD_LABEL[path] ?? (path || "Request");
+    return `${where}: ${message}`;
+  });
+  return parts.length ? `${base} ${parts.join("; ")}.` : base;
+}
+
 export function InvoiceForm() {
   const router = useRouter();
   const params = useSearchParams();
@@ -107,14 +135,17 @@ export function InvoiceForm() {
       toast(`Invoice ${invoice.invoice_number} created for ${invoice.customer_name}`);
       router.push(`/invoices/${invoice.id}`);
     } catch (err) {
-      // Backend VALIDATION_ERROR details are keyed by the last `loc` segment (ApiError.fieldErrors).
-      // Only top-level fields are mapped onto inputs; item-level keys (e.g. "description") are not,
-      // as the last segment alone does not say which line they belong to. The error also stays on
-      // `create.error`; note the FormError below suppresses any VALIDATION_ERROR that has field errors,
-      // so a server rejection naming only item fields is not shown anywhere on the form.
+      // Map each server validation error onto its input, using the full location so line-item errors
+      // land on the right line ("items.1.quantity" -> Item 2's Quantity). Every error, mapped or not, is
+      // also listed in the summary below together with the server's own message.
       if (err instanceof ApiError) {
-        for (const [field, message] of Object.entries(err.fieldErrors())) {
-          if (["customer_id", "invoice_date", "due_date", "notes"].includes(field)) form.setError(field as keyof Values, { message });
+        for (const { path, message } of err.fieldErrorsByPath()) {
+          const item = /^items\.(\d+)\.(description|quantity|unit_price)$/.exec(path);
+          if (item && Number(item[1]) < v.items.length) {
+            form.setError(`items.${Number(item[1])}.${item[2] as "description" | "quantity" | "unit_price"}`, { message });
+          } else if (["customer_id", "invoice_date", "due_date", "notes"].includes(path)) {
+            form.setError(path as keyof Values, { message });
+          }
         }
       }
     }
@@ -185,7 +216,7 @@ export function InvoiceForm() {
           <p className="mt-1 text-xs text-muted">For convenience only. KAIRA calculates the official total from the items when you save.</p>
         </div>
         {/* Shows every failure except a VALIDATION_ERROR with field errors; as only customer_id, invoice_date, due_date and notes are mapped onto inputs, item-only server errors are currently not displayed. */}
-        <FormError message={create.error && !(create.error instanceof ApiError && create.error.code === "VALIDATION_ERROR" && Object.keys(create.error.fieldErrors()).length) ? describeError(create.error) : null} />
+        <FormError message={create.error ? serverErrorSummary(create.error) : null} />
         <Button type="submit" size="lg" className="w-full" loading={create.isPending}>Create invoice</Button>
       </Card>
     </form>

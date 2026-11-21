@@ -3,7 +3,7 @@
  * Everything is rendered with renderApp, so API calls go through the real client (CSRF, envelope
  * handling) to an in-test handler.
  */
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -113,6 +113,58 @@ describe("InvoiceForm", () => {
         { description: "Dal", quantity: "1", unit_price: "0.10" },
       ],
     });
+  });
+
+  // Server-side line-item validation errors land on the right line and are also listed with the server message.
+  it("shows the backend's line-item validation errors on the affected line and in the summary", async () => {
+    renderApp(<InvoiceForm />, {
+      handler: (req) => {
+        if (pathOf(req).startsWith("GET /customers")) return envelope({ items: [{ id: "cust-1", name: "Ramesh Kumar" }], total: 1, page: 1, page_size: 200 });
+        if (pathOf(req) === "POST /invoices") {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              data: null,
+              error: {
+                code: "VALIDATION_ERROR",
+                message: "The supplied data is invalid.",
+                details: {
+                  errors: [
+                    { loc: ["body", "items", 0, "description"], msg: "String should have at most 500 characters", type: "string_too_long" },
+                    { loc: ["body", "items", 1, "quantity"], msg: "Input should be greater than 0", type: "greater_than" },
+                    { loc: ["body", "items", 1, "unit_price"], msg: "Value error, at most 2 decimal places", type: "value_error" },
+                    { loc: ["body", "items"], msg: "List should have at most 100 items", type: "too_long" },
+                  ],
+                },
+              },
+            }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          );
+        }
+        return envelope({});
+      },
+    });
+    await screen.findByRole("option", { name: "Ramesh Kumar" });
+    await userEvent.selectOptions(screen.getByLabelText("Customer"), "cust-1");
+    await userEvent.type(screen.getByLabelText("Item 1 description"), "Rice bags");
+    await userEvent.type(screen.getByLabelText("Unit price (₹)"), "100");
+    await userEvent.click(screen.getByRole("button", { name: /add item/i }));
+    await userEvent.type(screen.getByLabelText("Item 2 description"), "Dal");
+    await userEvent.type(screen.getAllByLabelText("Unit price (₹)")[1], "10");
+    await userEvent.click(screen.getByRole("button", { name: "Create invoice" }));
+
+    const lines = await screen.findAllByTestId("invoice-item");
+    // Inline, on the right line and field.
+    expect(await within(lines[0]).findByText("String should have at most 500 characters")).toBeInTheDocument();
+    expect(within(lines[1]).getByText("Input should be greater than 0")).toBeInTheDocument();
+    expect(within(lines[1]).getByText("at most 2 decimal places")).toBeInTheDocument();
+    expect(within(lines[0]).queryByText("Input should be greater than 0")).not.toBeInTheDocument();
+    // Summary: the server's own message plus every error, including the one with no input to attach to.
+    const summary = screen.getByText(/The supplied data is invalid./);
+    expect(summary).toHaveTextContent("Item 1 – Description: String should have at most 500 characters");
+    expect(summary).toHaveTextContent("Item 2 – Quantity: Input should be greater than 0");
+    expect(summary).toHaveTextContent("Item 2 – Unit price: at most 2 decimal places");
+    expect(summary).toHaveTextContent("Items: List should have at most 100 items");
   });
 
   // Client-side validation blocks submission of an incomplete form.
