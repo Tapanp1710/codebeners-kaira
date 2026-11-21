@@ -1,13 +1,13 @@
 """Operational commands - no SQL or code edits needed by the owner.
 
-    python -m app.cli check-config      validate .env and report problems
-    python -m app.cli wait-db [--timeout 60]
-    python -m app.cli migrate           apply Alembic migrations (alembic upgrade head)
-    python -m app.cli seed              idempotent demo data (development only)
-    python -m app.cli create-owner --business "Name" --email you@x.com --name "You" [--opening-cash 0]
-                                        first production account (password read from KAIRA_OWNER_PASSWORD
-                                        or prompted)
-    python -m app.cli export-openapi [path]
+python -m app.cli check-config      validate .env and report problems
+python -m app.cli wait-db [--timeout 60]
+python -m app.cli migrate           apply Alembic migrations (alembic upgrade head)
+python -m app.cli seed              idempotent demo data (development only)
+python -m app.cli create-owner --business "Name" --email you@x.com --name "You" [--opening-cash 0]
+                                    first production account (password read from KAIRA_OWNER_PASSWORD
+                                    or prompted)
+python -m app.cli export-openapi [path]
 """
 
 from __future__ import annotations
@@ -37,7 +37,9 @@ def _settings():
 def cmd_check_config(_: argparse.Namespace) -> int:
     s = _settings()
     print(f"APP_ENV={s.APP_ENV}  database={s.DATABASE_URL.split('@')[-1]}")
-    print(f"Voice/AI provider: {'Sarvam configured' if s.sarvam_configured else 'NOT configured (typed input only)'}")
+    print(
+        f"Voice/AI provider: {'Sarvam configured' if s.sarvam_configured else 'NOT configured (typed input only)'}"
+    )
     print(f"Extraction provider: {s.extraction_provider}")
     print(f"CORS origins: {', '.join(s.CORS_ORIGINS)}")
     print("Configuration OK")
@@ -86,7 +88,9 @@ def cmd_seed(args: argparse.Namespace) -> int:
         generated = True
     db = _session()
     try:
-        result = seed_demo(db, owner_email=s.DEMO_OWNER_EMAIL, owner_password=password, timezone=s.DEFAULT_TIMEZONE)
+        result = seed_demo(
+            db, owner_email=s.DEMO_OWNER_EMAIL, owner_password=password, timezone=s.DEFAULT_TIMEZONE
+        )
         db.commit()
     finally:
         db.close()
@@ -121,14 +125,22 @@ def cmd_create_owner(args: argparse.Namespace) -> int:
             currency=s.DEFAULT_CURRENCY,
             timezone=s.DEFAULT_TIMEZONE,
             opening_cash_balance=Decimal(args.opening_cash),
-            opening_cash_as_of=date.fromisoformat(args.opening_date) if args.opening_date
+            opening_cash_as_of=date.fromisoformat(args.opening_date)
+            if args.opening_date
             else business_today(s.DEFAULT_TIMEZONE),
             overdue_collection_delay_days=s.DEFAULT_OVERDUE_COLLECTION_DELAY_DAYS,
         )
         db.add(business)
         db.flush()
-        db.add(User(business_id=business.id, name=args.name, email=args.email.lower(),
-                    password_hash=hash_password(password), role="owner"))
+        db.add(
+            User(
+                business_id=business.id,
+                name=args.name,
+                email=args.email.lower(),
+                password_hash=hash_password(password),
+                role="owner",
+            )
+        )
         db.commit()
         print(f"Created business '{business.name}' with owner {args.email.lower()}")
     finally:

@@ -120,6 +120,7 @@ class WarningOut(ApiModel):
     code: str
     message: str
     operation_index: int | None = None
+    blocking: bool = Field(default=False, description="True when this warning prevents approval.")
 
 
 class EvidenceOut(ApiModel):

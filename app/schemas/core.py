@@ -25,7 +25,8 @@ def _strip(v: str | None) -> str | None:
 
 # ---------------------------------------------------------------- auth
 class LoginRequest(ApiModel):
-    email: EmailStr
+    # A plain lookup key: deliverability rules (e.g. reserved .local domains) do not apply.
+    email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
     password: str = Field(min_length=1, max_length=256)
 
 
