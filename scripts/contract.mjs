@@ -18,8 +18,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // All paths are resolved from the repo root so the script is independent of the working directory.
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+// The repository (tools come from its node_modules). KAIRA_CONTRACT_ROOT points the files at another tree
+// with the same layout; used by tests/contract-script.test.ts.
+const REPO = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = process.env.KAIRA_CONTRACT_ROOT || REPO;
 const SPEC = join(ROOT, "contracts", "openapi.json");
+const IMPORT_HINT =
+  "Copy the backend's docs/openapi.json to contracts/openapi.json (in kaira-frontend), then run: npm run contract:generate";
 const TYPES = join(ROOT, "lib", "api", "schema.d.ts");
 const VERSION = join(ROOT, "contracts", "CONTRACT_VERSION");
 
@@ -47,7 +52,7 @@ function readVersion() {
 
 /** Runs the locally installed openapi-typescript CLI with the current Node binary (no npx, no network) and writes types to outFile. */
 function generate(outFile) {
-  const bin = join(ROOT, "node_modules", "openapi-typescript", "bin", "cli.js");
+  const bin = join(REPO, "node_modules", "openapi-typescript", "bin", "cli.js");
   execFileSync(process.execPath, [bin, SPEC, "-o", outFile], { stdio: "pipe" });
 }
 
@@ -56,7 +61,7 @@ function record() {
   const spec = readFileSync(SPEC, "utf8");
   const parsed = JSON.parse(spec);
   const previous = readVersion();
-  const pkg = JSON.parse(readFileSync(join(ROOT, "node_modules", "openapi-typescript", "package.json"), "utf8"));
+  const pkg = JSON.parse(readFileSync(join(REPO, "node_modules", "openapi-typescript", "package.json"), "utf8"));
   const lines = [
     `api_version=${parsed.info.version}`,
     `backend_branch=${process.env.BACKEND_BRANCH || previous.backend_branch || "feat/kaira-backend"}`,
@@ -80,7 +85,18 @@ async function check() {
     failed = true;
   };
   // Check 1: the committed spec is the one that was recorded (catches editing openapi.json without contract:generate).
+  if (!existsSync(SPEC)) {
+    fail(`contracts/openapi.json is missing. ${IMPORT_HINT}`);
+    process.exit(1);
+  }
   const spec = readFileSync(SPEC, "utf8");
+  try {
+    const parsed = JSON.parse(spec);
+    if (typeof parsed.openapi !== "string" || typeof parsed.paths !== "object") throw new Error("not an OpenAPI document");
+  } catch (err) {
+    fail(`contracts/openapi.json is not a valid OpenAPI JSON document (${err.message}). ${IMPORT_HINT}`);
+    process.exit(1);
+  }
   const version = readVersion();
   if (version.openapi_sha256 !== sha(spec)) {
     fail("contracts/openapi.json differs from contracts/CONTRACT_VERSION. Run: npm run contract:generate");
@@ -88,7 +104,13 @@ async function check() {
 
   // Check 2: regenerate types into a fresh temp directory and compare with the committed file (catches stale or hand-edited types).
   const tmp = join(mkdtempSync(join(tmpdir(), "kaira-contract-")), "schema.d.ts");
-  generate(tmp);
+  try {
+    generate(tmp);
+  } catch (err) {
+    const reason = String(err.stderr ?? err.message).trim().split(/\r?\n/)[0];
+    fail(`could not generate TypeScript types from contracts/openapi.json: ${reason}`);
+    process.exit(1);
+  }
   if (!existsSync(TYPES) || normalise(readFileSync(TYPES, "utf8")) !== normalise(readFileSync(tmp, "utf8"))) {
     fail("lib/api/schema.d.ts is stale. Run: npm run contract:generate");
   } else console.log("OK  generated TypeScript types match the contract");
@@ -104,7 +126,7 @@ async function check() {
       delete live.info?.title;
       delete local.info?.title;
       if (JSON.stringify(live) !== JSON.stringify(local)) {
-        fail(`backend at ${origin} serves a different contract. Re-import docs/openapi.json from the backend.`);
+        fail(`backend at ${origin} serves a different contract. ${IMPORT_HINT}`);
       } else console.log(`OK  live backend contract at ${origin} matches`);
     } catch (err) {
       // Unreachable backend is a SKIP, not a failure: the live check is best-effort.
