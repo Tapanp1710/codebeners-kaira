@@ -73,7 +73,7 @@ export default function CashflowPage() {
 
           <Card aria-labelledby="ms-title">
             <CardHeader id="ms-title" title="Projected balance" subtitle={<>Solid area = projected cash · dashed line = your safety threshold (<Money value={f.shortfall_threshold} />)</>} />
-            <dl className="mb-4 grid grid-cols-3 gap-3" data-testid="forecast-milestones">
+            <dl className="mb-4 grid gap-3 sm:grid-cols-3" data-testid="forecast-milestones">
               {f.milestones.map((m) => (
                 <div key={m.days} className="rounded-xl bg-cream/60 p-3">
                   <dt className="text-xs text-muted">In {m.days} days · {formatDate(m.date)}</dt>

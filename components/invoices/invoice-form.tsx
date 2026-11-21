@@ -3,6 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus, Trash2 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect } from "react";
 import { useFieldArray, useForm, useWatch } from "react-hook-form";
 import { z } from "zod";
 
@@ -49,6 +50,14 @@ export function InvoiceForm() {
       items: [{ description: "", quantity: "1", unit_price: "" }],
     },
   });
+  // The <select> renders before its options arrive; re-apply the requested customer once they exist.
+  const preselected = params.get("customer");
+  const loadedCustomers = customers.data;
+  useEffect(() => {
+    if (preselected && loadedCustomers?.items.some((c) => c.id === preselected)) {
+      form.resetField("customer_id", { defaultValue: preselected });
+    }
+  }, [preselected, loadedCustomers, form]);
   const { fields, append, remove } = useFieldArray({ control: form.control, name: "items" });
   const items = useWatch({ control: form.control, name: "items" });
   const lines = (items ?? []).map((i) => (i && isDecimalString(i.quantity ?? "") && isDecimalString(i.unit_price ?? "") ? estimateLine(i.quantity, i.unit_price) : null));

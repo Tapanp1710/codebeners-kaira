@@ -51,7 +51,7 @@ export const PAYMENT_METHOD_LABEL: Record<string, string> = {
 /** Accessible scrollable table wrapper that stays usable on mobile. */
 export function DataTable({ caption, children, className }: { caption: string; children: ReactNode; className?: string }) {
   return (
-    <div className={cn("-mx-5 overflow-x-auto px-5", className)}>
+    <div className={cn("relative -mx-5 overflow-x-auto px-5", className)}>
       <table className="w-full min-w-[640px] border-separate border-spacing-0 text-sm">
         <caption className="sr-only">{caption}</caption>
         {children}

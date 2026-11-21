@@ -54,7 +54,7 @@ export function LinkButton({ href, variant = "secondary", className, children }:
 // ------------------------------------------------------------------ Card
 export function Card({ className, children, ...rest }: ComponentProps<"section">) {
   return (
-    <section {...rest} className={cn("rounded-[var(--radius-card)] bg-paper p-5 shadow-[var(--shadow-card)] ring-1 ring-line/70", className)}>
+    <section {...rest} className={cn("min-w-0 rounded-[var(--radius-card)] bg-paper p-5 shadow-[var(--shadow-card)] ring-1 ring-line/70", className)}>
       {children}
     </section>
   );
@@ -115,7 +115,7 @@ export function Stat({ label, value, hint, tone, href }: { label: string; value:
     </>
   );
   return href ? (
-    <Link href={href} className="block rounded-[var(--radius-card)] bg-paper p-5 shadow-[var(--shadow-card)] ring-1 ring-line/70 transition hover:ring-steel/40">
+    <Link href={href} className="block min-w-0 rounded-[var(--radius-card)] bg-paper p-5 shadow-[var(--shadow-card)] ring-1 ring-line/70 transition hover:ring-steel/40">
       {body}
     </Link>
   ) : (
