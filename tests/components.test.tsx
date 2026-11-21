@@ -80,6 +80,8 @@ describe("ProposalCard", () => {
 
   // No optimistic success: while approve is pending the button is disabled (no double submit) and the result appears only after the backend resolves. Approve is a CSRF-protected POST.
   it("shows success only after the backend confirms execution, and refreshes data", async () => {
+    // The approve response is a promise resolved by hand, so the in-flight state can be asserted
+    // deterministically before the backend "answers"; every other call gets an empty list envelope.
     let resolveApprove!: (r: Response) => void;
     const { requests } = renderApp(<ProposalCard action={demoProposal()} />, {
       handler: (req) => {
@@ -135,6 +137,8 @@ describe("ProposalCard", () => {
 
   // can_approve=false from the backend disables Approve and the reason is displayed.
   it("disables approval while blocking issues remain and explains why", () => {
+    // The warning in this fixture is non-blocking; the disabled button comes only from can_approve=false,
+    // so the card must follow the backend's flag rather than re-deriving it from the warnings.
     renderApp(
       <ProposalCard
         action={demoProposal({
@@ -163,6 +167,7 @@ describe("ProposalCard", () => {
       handler: (req) => (req.method === "PATCH" ? envelope(demoProposal({ warnings: [{ code: "EDITED_BY_OWNER", message: "Values were edited by the owner after extraction.", operation_index: null, blocking: false }] })) : envelope({ items: [], total: 0, page: 1, page_size: 200 })),
     });
     await userEvent.click(screen.getByRole("button", { name: /edit/i }));
+    // Each operation has its own Amount field: index 0 is the payment, index 1 the promise.
     const amounts = screen.getAllByLabelText("Amount (₹)");
     await userEvent.clear(amounts[0]);
     await userEvent.type(amounts[0], "4500");

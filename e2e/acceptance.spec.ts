@@ -69,6 +69,7 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   await expect(ops.nth(1)).toContainText("Promised date");
   await expect(card).toContainText("Confidence:");
   await expect(card).toContainText("found in transcript");
+  // Full-page screenshots are kept under test-results/ as visual evidence of the acceptance run.
   await page.screenshot({ path: "test-results/acceptance-proposal.png", fullPage: true });
 
   // 6. Owner approval
@@ -83,6 +84,7 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   expect(promise?.amount).toBe(remaining);
   // The payment must be traceable to the approved action (source_action_id) and present in the audit log.
   const payments = await apiGet<{ items: { amount: string; source_action_id: string | null; invoice_id: string }[] }>(page.request, `/customers/${customerId}/payments`);
+  // Matched on amount as well as source_action_id: earlier runs may have left other assistant-made payments for Ramesh.
   const payment = payments.items.find((p) => p.source_action_id && p.amount === "5000.00");
   expect(payment).toBeTruthy();
   const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${payment!.source_action_id}`);
@@ -92,6 +94,7 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   expect(dash1.cash.current_cash).toBe(money(cents(dash0.cash.current_cash) + BigInt(500000))); // cash inflow
   expect(dash1.receivables.total_outstanding).toBe(money(cents(dash0.receivables.total_outstanding) - BigInt(500000)));
   const rec = await apiGet<{ items: { customer_name: string; outstanding: string }[] }>(page.request, `/receivables?customer_id=${customerId}`);
+  // Summed over all of Ramesh's open invoices: whichever invoice the payment landed on, the total must equal `remaining`.
   expect(rec.items.reduce((s, r) => s + cents(r.outstanding), BigInt(0))).toBe(cents(remaining));
 
   // 8. Dashboard refresh in the UI
@@ -103,6 +106,7 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   // 9. Cash-flow forecast 30/60/90
   await page.getByRole("link", { name: "Cash-Flow Forecast" }).first().click();
   for (const d of ["In 30 days", "In 60 days", "In 90 days"]) await expect(page.getByTestId("forecast-milestones")).toContainText(d);
+  // The commitment created by the approval in step 6 must now feed the forecast as an expected inflow.
   await expect(page.getByTestId("forecast-events")).toContainText("Ramesh Kumar promised payment");
 
   // 10. What-if: major customer 15 days late; nothing changes

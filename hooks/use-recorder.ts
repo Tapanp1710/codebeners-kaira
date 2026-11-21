@@ -33,6 +33,8 @@ export const RECORDER_MESSAGES: Record<RecorderError, string> = {
 // undefined lets MediaRecorder choose its own default. The resulting MIME type also decides the upload
 // file extension in transcribe().
 function pickMimeType(): string | undefined {
+  // Guard for server rendering and browsers without MediaRecorder; isTypeSupported is optional-chained
+  // below so an implementation that lacks it falls through to the browser default.
   if (typeof MediaRecorder === "undefined") return undefined;
   for (const type of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]) {
     if (MediaRecorder.isTypeSupported?.(type)) return type;
@@ -95,6 +97,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
       fail("unsupported");
       return;
     }
+    // "requesting" spans the browser's permission prompt, which waits on the user for as long as it takes.
     setStatus("requesting");
     let stream: MediaStream;
     try {
@@ -105,6 +108,8 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
       fail(name === "NotAllowedError" || name === "SecurityError" ? "permission_denied" : name === "NotFoundError" ? "no_microphone" : "recording_failed");
       return;
     }
+    // The stream is stored before the recorder is built, so every later fail() (constructor throw,
+    // onerror, empty recording) reaches it through release() and stops the microphone tracks.
     streamRef.current = stream;
     chunksRef.current = [];
     let recorder: MediaRecorder;
@@ -122,6 +127,7 @@ export function useRecorder(onComplete: (audio: Blob) => void) {
     recorder.onerror = () => fail("recording_failed");
     recorder.onstop = () => {
       release();
+      // recorder.mimeType can be an empty string when MediaRecorder picked its own default; fall back to WebM.
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       // Under ~200 bytes there is effectively no audio (e.g. an immediate second tap); don't upload it.
       if (blob.size < 200) {

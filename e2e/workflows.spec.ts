@@ -28,6 +28,7 @@ async function createCustomerWithInvoice(page: Page, name: string, total = "1800
   await expect(page.getByLabel("Customer")).toHaveValue(customerId);
   await page.getByLabel("Item 1 description").fill("Basmati rice bags");
   await page.getByLabel("Quantity").fill("6");
+  // With the default total, 18000 / 6 = 3000 exactly, so the unit price carries no rounding.
   await page.getByLabel("Unit price (₹)").fill(String(Number(total) / 6));
   await expect(page.getByTestId("invoice-estimate")).toContainText("₹18,000.00");
   await page.getByRole("button", { name: "Create invoice" }).click();
@@ -70,6 +71,8 @@ test.describe("authentication", () => {
     await context.clearCookies();
     await context.addCookies([refresh]); // access token "expired", refresh still valid
     await page.goto("/customers");
+    // Without an access cookie, proxy.ts sends the browser to /login, which silently refreshes and returns
+    // here; the extended timeout covers that redirect and refresh chain.
     await page.waitForURL((u) => u.pathname === "/customers", { timeout: 60_000 });
     await expect(page.locator("main h1")).toHaveText("Customers & Invoices");
 
@@ -82,6 +85,7 @@ test.describe("authentication", () => {
   // Calls the proxy directly with cookies but no X-CSRF-Token: the backend must answer 403 CSRF_FAILED.
   test("unsafe API calls without the CSRF header are refused by the backend through the proxy", async ({ page }) => {
     await login(page);
+    // page.request shares the browser context's cookies, so the session is valid and only the header is missing.
     const res = await page.request.post("/api/backend/api/v1/customers", { data: { name: "No CSRF" } });
     expect(res.status()).toBe(403);
     expect((await res.json()).error.code).toBe("CSRF_FAILED");
@@ -195,8 +199,10 @@ test.describe("assistant and approvals", () => {
     await expect(panel.getByTestId("orb-state")).toHaveText("idle");
     await panel.getByTestId("voice-orb").click();
     await expect(panel.getByTestId("orb-state")).toHaveText("listening");
+    // Record long enough to produce real audio; a near-instant second tap would end as empty_recording instead.
     await page.waitForTimeout(1500);
     await panel.getByTestId("voice-orb").click();
+    // Read the backend's own provider status so the expected end state matches this environment.
     const ready = await page.request.get("/api/backend/api/v1/ready").then((r) => r.json());
     if (ready.data?.checks?.voice_provider === "configured") {
       await expect(panel.getByTestId("orb-state")).toHaveText(/ready|error/);
@@ -262,6 +268,7 @@ test.describe("forecast and what-if", () => {
     await page.getByRole("button", { name: "Open navigation" }).click();
     await page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name: "Receivables" }).click();
     await expect(page.locator("main h1")).toHaveText("Receivables");
+    // 1px tolerance absorbs sub-pixel rounding of scrollWidth.
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     expect(overflow).toBe(false);
   });

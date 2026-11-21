@@ -54,6 +54,7 @@ describe("PaymentDialog", () => {
   // Overpayment is caught client-side: no request is sent at all.
   it("blocks amounts above the outstanding balance before calling the API", async () => {
     const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />);
+    // One paisa over the outstanding balance: the comparison has to be exact, not float-rounded.
     await userEvent.type(screen.getByLabelText("Amount (₹)"), "12000.01");
     await userEvent.click(screen.getByRole("button", { name: "Record payment" }));
     expect(await screen.findByText(/Cannot exceed the outstanding ₹12,000.00/)).toBeInTheDocument();
@@ -90,6 +91,7 @@ describe("InvoiceForm", () => {
         return envelope({});
       },
     });
+    // Wait for the customer list to load: options arrive asynchronously and selectOptions needs them present.
     await screen.findByRole("option", { name: "Ramesh Kumar" });
     await userEvent.selectOptions(screen.getByLabelText("Customer"), "cust-1");
     await userEvent.type(screen.getByLabelText("Item 1 description"), "Rice bags");
@@ -116,6 +118,7 @@ describe("InvoiceForm", () => {
   // Client-side validation blocks submission of an incomplete form.
   it("validates required fields before submitting", async () => {
     const { requests } = renderApp(<InvoiceForm />, { handler: () => envelope({ items: [], total: 0, page: 1, page_size: 200 }) });
+    // The mocked ?customer=cust-1 query preselects a customer, so the selection is cleared explicitly.
     await userEvent.selectOptions(screen.getByLabelText("Customer"), "");
     await userEvent.click(screen.getByRole("button", { name: "Create invoice" }));
     expect(await screen.findByText("Choose a customer", { selector: "p" })).toBeInTheDocument();
@@ -141,6 +144,7 @@ describe("AssistantPanel", () => {
 
   // A getUserMedia rejection (NotAllowedError) must surface as an error state, not a fake "listening" UI.
   it("reports a denied microphone instead of pretending to record", async () => {
+    // An empty class is enough: getUserMedia rejects first, so MediaRecorder is only feature-detected, never constructed.
     Object.defineProperty(globalThis, "MediaRecorder", { value: class {}, configurable: true });
     Object.defineProperty(navigator, "mediaDevices", {
       value: { getUserMedia: vi.fn(async () => Promise.reject(new DOMException("denied", "NotAllowedError"))) },
