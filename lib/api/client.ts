@@ -15,7 +15,13 @@ import { ApiError, NETWORK_ERROR, TIMEOUT_ERROR, type ErrorBody } from "./errors
 import type { paths, Session } from "./types";
 
 export const API_BASE = "/api/backend";
-const API_V1 = `${API_BASE}/api/v1`;
+
+/** Absolute same-origin URL (Request objects outside browsers reject relative URLs). */
+export function apiUrl(path: string): string {
+  const origin = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://localhost";
+  return `${origin}${path}`;
+}
+const v1 = (path: string) => apiUrl(`${API_BASE}/api/v1${path}`);
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LONG_TIMEOUT_MS = 95_000;
@@ -84,13 +90,13 @@ let refreshInFlight: Promise<boolean> | null = null;
 
 async function runRefresh(): Promise<boolean> {
   // Another tab may already have refreshed: the new access cookie then makes /me succeed.
-  const me = await transport(new Request(`${API_V1}/auth/me`, { credentials: "same-origin" }));
+  const me = await transport(new Request(v1("/auth/me"), { credentials: "same-origin" }));
   if (me.ok) {
     const body = await me.json();
     publish(body.data as Session);
     return true;
   }
-  const res = await transport(new Request(`${API_V1}/auth/refresh`, { method: "POST", credentials: "same-origin" }));
+  const res = await transport(new Request(v1("/auth/refresh"), { method: "POST", credentials: "same-origin" }));
   if (!res.ok) return false;
   const body = await res.json();
   publish(body.data as Session);
@@ -111,7 +117,7 @@ export function refreshSession(): Promise<boolean> {
 }
 
 async function syncCsrf(): Promise<void> {
-  const res = await transport(new Request(`${API_V1}/auth/me`, { credentials: "same-origin" }));
+  const res = await transport(new Request(v1("/auth/me"), { credentials: "same-origin" }));
   if (res.ok) publish((await res.json()).data as Session);
 }
 
@@ -137,7 +143,7 @@ export const kairaFetch: FetchLike = async (input) => {
   return res;
 };
 
-export const api = createClient<paths>({ baseUrl: API_BASE, fetch: kairaFetch });
+export const api = createClient<paths>({ baseUrl: apiUrl(API_BASE), fetch: kairaFetch });
 
 // ------------------------------------------------------------------ envelope handling
 type Envelope<T> = { success: boolean; data?: T | null; error?: ErrorBody | null };

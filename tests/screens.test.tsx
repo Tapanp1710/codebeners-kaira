@@ -1,0 +1,167 @@
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+
+import { NAV } from "@/components/layout/app-shell";
+import { InvoiceForm } from "@/components/invoices/invoice-form";
+import { PaymentDialog } from "@/components/invoices/payment-form";
+import { AssistantPanel } from "@/components/voice/assistant-panel";
+import type { Invoice } from "@/lib/api/types";
+
+import { envelope } from "./fixtures";
+import { pathOf, renderApp } from "./render";
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/invoices/new",
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams("customer=cust-1"),
+}));
+
+const invoice = {
+  id: "inv-1",
+  invoice_number: "INV-0001",
+  customer_id: "cust-1",
+  customer_name: "Ramesh Kumar",
+  invoice_date: "2026-11-01",
+  due_date: "2026-12-01",
+  lifecycle_status: "issued",
+  payment_status: "partially_paid",
+  is_overdue: false,
+  days_overdue: 0,
+  total: "18000.00",
+  paid: "6000.00",
+  outstanding: "12000.00",
+  notes: null,
+  created_at: "2026-11-01T00:00:00Z",
+  items: [],
+} as Invoice;
+
+describe("navigation", () => {
+  it("has exactly the five primary destinations", () => {
+    expect(NAV.map((n) => n.label)).toEqual(["Dashboard", "Customers & Invoices", "Receivables", "Cash-Flow Forecast", "What-If Analysis"]);
+  });
+});
+
+describe("PaymentDialog", () => {
+  it("blocks amounts above the outstanding balance before calling the API", async () => {
+    const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />);
+    await userEvent.type(screen.getByLabelText("Amount (₹)"), "12000.01");
+    await userEvent.click(screen.getByRole("button", { name: "Record payment" }));
+    expect(await screen.findByText(/Cannot exceed the outstanding ₹12,000.00/)).toBeInTheDocument();
+    expect(requests).toHaveLength(0);
+  });
+
+  it("records a partial payment with an idempotency key and shows the confirmed balance", async () => {
+    const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />, {
+      handler: (req) =>
+        pathOf(req) === "POST /invoices/inv-1/payments"
+          ? envelope({ replayed: false, payment: { amount: "5000.00", payment_date: "2026-11-21" }, invoice: { ...invoice, paid: "11000.00", outstanding: "7000.00" } }, 201)
+          : envelope({}),
+    });
+    await userEvent.type(screen.getByLabelText("Amount (₹)"), "5000");
+    await userEvent.selectOptions(screen.getByLabelText("Method"), "upi");
+    await userEvent.click(screen.getByRole("button", { name: "Record payment" }));
+    expect(await screen.findByTestId("payment-confirmed")).toHaveTextContent("₹7,000.00");
+    const post = requests.find((r) => r.method === "POST")!;
+    expect(post.headers.get("idempotency-key")).toMatch(/.{8,}/);
+    expect(await post.json()).toMatchObject({ amount: "5000", payment_method: "upi" });
+  });
+});
+
+describe("InvoiceForm", () => {
+  it("shows a running estimate with exact decimals and posts the contract body", async () => {
+    const { requests } = renderApp(<InvoiceForm />, {
+      handler: (req) => {
+        if (pathOf(req).startsWith("GET /customers")) {
+          return envelope({ items: [{ id: "cust-1", name: "Ramesh Kumar" }], total: 1, page: 1, page_size: 200 });
+        }
+        if (pathOf(req) === "POST /invoices") return envelope({ ...invoice, id: "inv-9", invoice_number: "INV-0009" }, 201);
+        return envelope({});
+      },
+    });
+    await screen.findByRole("option", { name: "Ramesh Kumar" });
+    await userEvent.selectOptions(screen.getByLabelText("Customer"), "cust-1");
+    await userEvent.type(screen.getByLabelText("Item 1 description"), "Rice bags");
+    const qty = screen.getByLabelText("Quantity");
+    await userEvent.clear(qty);
+    await userEvent.type(qty, "3");
+    await userEvent.type(screen.getByLabelText("Unit price (₹)"), "1250.50");
+    await userEvent.click(screen.getByRole("button", { name: /add item/i }));
+    await userEvent.type(screen.getByLabelText("Item 2 description"), "Dal");
+    await userEvent.type(screen.getAllByLabelText("Unit price (₹)")[1], "0.10");
+    expect(screen.getByTestId("invoice-estimate")).toHaveTextContent("₹3,751.60");
+    await userEvent.click(screen.getByRole("button", { name: "Create invoice" }));
+    await waitFor(() => expect(requests.some((r) => pathOf(r) === "POST /invoices")).toBe(true));
+    const body = await requests.find((r) => pathOf(r) === "POST /invoices")!.json();
+    expect(body).toMatchObject({
+      customer_id: "cust-1",
+      items: [
+        { description: "Rice bags", quantity: "3", unit_price: "1250.50" },
+        { description: "Dal", quantity: "1", unit_price: "0.10" },
+      ],
+    });
+  });
+
+  it("validates required fields before submitting", async () => {
+    const { requests } = renderApp(<InvoiceForm />, { handler: () => envelope({ items: [], total: 0, page: 1, page_size: 200 }) });
+    await userEvent.selectOptions(screen.getByLabelText("Customer"), "");
+    await userEvent.click(screen.getByRole("button", { name: "Create invoice" }));
+    expect(await screen.findByText("Choose a customer", { selector: "p" })).toBeInTheDocument();
+    expect(screen.getByText("Describe the item")).toBeInTheDocument();
+    expect(requests.some((r) => r.method === "POST")).toBe(false);
+  });
+});
+
+describe("AssistantPanel", () => {
+  const readyHandler = (req: Request) =>
+    pathOf(req) === "GET /ready"
+      ? envelope({ status: "ready", checks: { voice_provider: "not_configured", extraction_provider: "rules" } })
+      : envelope({});
+
+  it("states honestly that voice needs the Sarvam key on the server", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => readyHandler(new Request(new URL(url, "http://localhost")))));
+    renderApp(<AssistantPanel />, { handler: readyHandler });
+    expect(await screen.findByText(/Voice is not available on this server yet/)).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("reports a denied microphone instead of pretending to record", async () => {
+    Object.defineProperty(globalThis, "MediaRecorder", { value: class {}, configurable: true });
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: { getUserMedia: vi.fn(async () => Promise.reject(new DOMException("denied", "NotAllowedError"))) },
+      configurable: true,
+    });
+    renderApp(<AssistantPanel />, { handler: readyHandler });
+    await userEvent.click(screen.getByTestId("voice-orb"));
+    expect(await screen.findByText(/Microphone access was blocked/)).toBeInTheDocument();
+    expect(screen.getByTestId("orb-state")).toHaveTextContent("error");
+  });
+
+  it("reports an unsupported browser", async () => {
+    Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
+    renderApp(<AssistantPanel />, { handler: readyHandler });
+    await userEvent.click(screen.getByTestId("voice-orb"));
+    expect(await screen.findByText(/cannot record audio/)).toBeInTheDocument();
+  });
+
+  it("sends a typed request to /assistant/extract and renders the answer", async () => {
+    const { requests } = renderApp(<AssistantPanel />, {
+      handler: (req) =>
+        pathOf(req) === "POST /assistant/extract"
+          ? envelope({
+              conversation_id: "c",
+              transcript: "How much do my customers owe me?",
+              language: null,
+              provider: "rules",
+              kind: "answer",
+              answer: { intent: "query_receivables", language: "en-IN", answer: "Customers owe you ₹2,29,500.00 across 4 invoice(s).", answer_language: "en-IN", data: {} },
+            })
+          : readyHandler(req),
+    });
+    await userEvent.type(screen.getByTestId("assistant-input"), "How much do my customers owe me?");
+    await userEvent.click(screen.getByTestId("assistant-submit"));
+    expect(await screen.findByTestId("assistant-answer")).toHaveTextContent("₹2,29,500.00");
+    const body = await requests.find((r) => pathOf(r) === "POST /assistant/extract")!.json();
+    expect(body).toEqual({ transcript: "How much do my customers owe me?", language: null, input_mode: "text" });
+  });
+});

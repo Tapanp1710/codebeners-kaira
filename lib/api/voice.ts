@@ -1,6 +1,6 @@
 "use client";
 
-import { api, API_BASE, kairaFetch, unwrap } from "./client";
+import { api, API_BASE, apiUrl, kairaFetch, unwrap } from "./client";
 import type { LanguageCode, Speech, Transcription } from "./types";
 
 export type TranscribeLanguage = LanguageCode | "unknown";
@@ -15,7 +15,7 @@ export async function transcribe(audio: Blob, language: TranscribeLanguage): Pro
   const ext = audio.type.includes("mp4") ? "m4a" : audio.type.includes("ogg") ? "ogg" : "webm";
   form.append("file", audio, `recording.${ext}`);
   if (language !== "unknown") form.append("language_code", language);
-  const request = new Request(`${API_BASE}/api/v1/voice/transcribe`, { method: "POST", body: form });
+  const request = new Request(apiUrl(`${API_BASE}/api/v1/voice/transcribe`), { method: "POST", body: form });
   return unwrap<Transcription>(
     (async () => {
       const response = await kairaFetch(request);
