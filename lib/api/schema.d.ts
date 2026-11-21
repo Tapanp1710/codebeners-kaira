@@ -352,6 +352,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/payment-attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Attempts */
+        get: operations["list_attempts_api_v1_payment_attempts_get"];
+        put?: never;
+        /** Register an intended invoice or bill payment (200 when an existing attempt is returned) */
+        post: operations["register_attempt_api_v1_payment_attempts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/payment-attempts/{attempt_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Attempt */
+        get: operations["get_attempt_api_v1_payment_attempts__attempt_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/payment-attempts/{attempt_id}/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Execute or safely retry the frozen payment (same key, same request) */
+        post: operations["execute_attempt_api_v1_payment_attempts__attempt_id__execute_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/payment-attempts/{attempt_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a pending attempt; refused (409) if any payment exists under its key */
+        post: operations["cancel_attempt_api_v1_payment_attempts__attempt_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/payment-commitments": {
         parameters: {
             query?: never;
@@ -1439,6 +1508,16 @@ export interface components {
             data?: components["schemas"]["Page_InvoiceSummaryOut_"] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
+        /** Envelope[Page[PaymentAttemptOut]] */
+        Envelope_Page_PaymentAttemptOut__: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["Page_PaymentAttemptOut_"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
         /** Envelope[Page[PaymentOut]] */
         Envelope_Page_PaymentOut__: {
             /**
@@ -1467,6 +1546,16 @@ export interface components {
              */
             success: boolean;
             data?: components["schemas"]["Page_ReceivableOut_"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
+        /** Envelope[PaymentAttemptDetailOut] */
+        Envelope_PaymentAttemptDetailOut_: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["PaymentAttemptDetailOut"] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
         /** Envelope[PaymentRecordedOut] */
@@ -2153,6 +2242,17 @@ export interface components {
             /** Page Size */
             page_size: number;
         };
+        /** Page[PaymentAttemptOut] */
+        Page_PaymentAttemptOut_: {
+            /** Items */
+            items: components["schemas"]["PaymentAttemptOut"][];
+            /** Total */
+            total: number;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+        };
         /** Page[PaymentOut] */
         Page_PaymentOut_: {
             /** Items */
@@ -2185,6 +2285,173 @@ export interface components {
             page: number;
             /** Page Size */
             page_size: number;
+        };
+        /** PaymentAttemptCreate */
+        PaymentAttemptCreate: {
+            /**
+             * Resource Type
+             * @enum {string}
+             */
+            resource_type: "invoice" | "bill";
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /**
+             * Idempotency Key
+             * @description Optional client key. Omit it to let the server generate one. Supply it to register a payment the client may already have sent with this key (it is then linked to the recorded payment).
+             */
+            idempotency_key?: string | null;
+            /** Amount */
+            amount: number | string;
+            /**
+             * Payment Date
+             * @description Defaults to the business's today when executed.
+             */
+            payment_date?: string | null;
+            /**
+             * Payment Method
+             * @default cash
+             * @enum {string}
+             */
+            payment_method: "cash" | "upi" | "bank_transfer" | "cheque" | "card" | "other";
+            /** Reference */
+            reference?: string | null;
+            /**
+             * Notes
+             * @description Invoice payments only.
+             */
+            notes?: string | null;
+        };
+        /** PaymentAttemptDetailOut */
+        PaymentAttemptDetailOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Resource Type
+             * @enum {string}
+             */
+            resource_type: "invoice" | "bill";
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /**
+             * Resource Label
+             * @description Invoice number or bill vendor, for lists.
+             */
+            resource_label: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "succeeded" | "rejected" | "cancelled";
+            request: components["schemas"]["PaymentAttemptRequest"];
+            /** Payment Id */
+            payment_id: string | null;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Failure Message */
+            failure_message: string | null;
+            /** Created By */
+            created_by: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Completed At */
+            completed_at: string | null;
+            /** @description Present when status is succeeded. */
+            result?: components["schemas"]["PaymentAttemptResult"] | null;
+        };
+        /** PaymentAttemptOut */
+        PaymentAttemptOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Resource Type
+             * @enum {string}
+             */
+            resource_type: "invoice" | "bill";
+            /**
+             * Resource Id
+             * Format: uuid
+             */
+            resource_id: string;
+            /**
+             * Resource Label
+             * @description Invoice number or bill vendor, for lists.
+             */
+            resource_label: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "succeeded" | "rejected" | "cancelled";
+            request: components["schemas"]["PaymentAttemptRequest"];
+            /** Payment Id */
+            payment_id: string | null;
+            /** Failure Code */
+            failure_code: string | null;
+            /** Failure Message */
+            failure_message: string | null;
+            /** Created By */
+            created_by: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Completed At */
+            completed_at: string | null;
+        };
+        /**
+         * PaymentAttemptRequest
+         * @description The frozen request, exactly as it will be (re)sent.
+         */
+        PaymentAttemptRequest: {
+            /** Amount */
+            amount: string;
+            /** Payment Date */
+            payment_date: string | null;
+            /** Payment Method */
+            payment_method: string;
+            /** Reference */
+            reference: string | null;
+            /** Notes */
+            notes: string | null;
+        };
+        /**
+         * PaymentAttemptResult
+         * @description The confirmed outcome; exactly one of the two payment shapes is set.
+         */
+        PaymentAttemptResult: {
+            /**
+             * Replayed
+             * @description True when the payment had already been recorded under this attempt's key.
+             */
+            replayed: boolean;
+            invoice_payment?: components["schemas"]["PaymentRecordedOut"] | null;
+            bill_payment?: components["schemas"]["BillPaymentRecordedOut"] | null;
         };
         /** PaymentCreate */
         PaymentCreate: {
@@ -3634,6 +3901,167 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Envelope_BillPaymentRecordedOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_attempts_api_v1_payment_attempts_get: {
+        parameters: {
+            query?: {
+                status?: ("pending" | "succeeded" | "rejected" | "cancelled") | null;
+                resource_type?: ("invoice" | "bill") | null;
+                resource_id?: string | null;
+                page?: number;
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Page_PaymentAttemptOut__"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    register_attempt_api_v1_payment_attempts_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaymentAttemptCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_PaymentAttemptDetailOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_attempt_api_v1_payment_attempts__attempt_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_PaymentAttemptDetailOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    execute_attempt_api_v1_payment_attempts__attempt_id__execute_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_PaymentAttemptDetailOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_attempt_api_v1_payment_attempts__attempt_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_PaymentAttemptDetailOut_"];
                 };
             };
             /** @description Validation Error */

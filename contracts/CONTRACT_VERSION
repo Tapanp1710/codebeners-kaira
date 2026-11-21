@@ -1,8 +1,8 @@
-api_version=1.0.0
-backend_branch=feat/kaira-backend
-backend_commit=357bc565225c80cbd6f4d08240236a8a5844bbf7
-openapi_sha256=bdba4f2607741317a3b49601a1a026cf4f125ead7746cd8761eae29af0e894fe
-paths=39
-schemas=109
-imported_on=2026-11-21
+api_version=1.1.0
+backend_branch=feat/payment-integrity
+backend_commit=578cedeefe23c7ba27df8b9d618a9bca27cf64ee
+openapi_sha256=6a83d72da544886c663ed817ab60bc7e7e3f6ababdba4a26b9086ffd712e67fc
+paths=43
+schemas=117
+imported_on=2026-11-22
 types_generator=openapi-typescript@7.13.0
