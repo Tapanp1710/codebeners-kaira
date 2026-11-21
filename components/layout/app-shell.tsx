@@ -32,6 +32,7 @@ import { Badge, cn } from "@/components/ui/primitives";
 import { AssistantPanel } from "@/components/voice/assistant-panel";
 import { VoiceOrb } from "@/components/voice/voice-orb";
 import { logout } from "@/lib/api/client";
+import { clearLocalAttemptsForLogout } from "@/lib/payments/server-attempts";
 import { useActions, useInsights } from "@/lib/api/hooks";
 
 /**
@@ -213,6 +214,9 @@ function UserMenu() {
   async function onLogout() {
     setBusy(true);
     try {
+      // Payment records in this browser are only a recovery aid; the server keeps every unconfirmed payment
+      // for the next login (any device). Clear them so the next person on this device cannot see them.
+      await clearLocalAttemptsForLogout(session!.business.id).catch(() => 0);
       await logout();
     } finally {
       qc.clear();

@@ -161,3 +161,34 @@ export async function runLocalAttempt(kind: Kind, businessId: string, targetId: 
 export function runServerAttempt(attemptId: string): Promise<Outcome> {
   return execute(attemptId);
 }
+
+/**
+ * Logout privacy: removes this business's payment records from browser storage without losing any payment.
+ *
+ * - v2 records only ever sent their key to POST /payment-attempts, so the server either holds the attempt
+ *   (recoverable after the next login, from any device) or nothing happened at all: safe to remove.
+ * - v1 records (older builds) may have been sent straight to a payment endpoint: each is registered with its
+ *   original key first (the server links an already-recorded payment), and removed only if that succeeds.
+ *   One that cannot be registered now (offline, for example) is kept.
+ * Server-side attempts are never cancelled here. Returns how many records were kept.
+ */
+export async function clearLocalAttemptsForLogout(businessId: string): Promise<number> {
+  let kept = 0;
+  for (const kind of ["invoice", "bill"] as const) {
+    const store = attemptStores[kind];
+    for (const targetId of store.listPending(businessId)) {
+      const local = store.load(businessId, targetId) as LocalAttempt | null;
+      if (!local) continue;
+      if (local.v === 1) {
+        try {
+          await registerAttempt(kind, targetId, local.key, local.body);
+        } catch {
+          kept += 1; // not provably on the server yet: keep it for the next session
+          continue;
+        }
+      }
+      store.reject(businessId, targetId, local.key);
+    }
+  }
+  return kept;
+}
