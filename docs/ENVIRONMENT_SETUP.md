@@ -70,3 +70,21 @@ endpoints return `503 PROVIDER_NOT_CONFIGURED` with instructions, and typed work
 python -m app.cli check-config | wait-db | migrate | seed | export-openapi [path]
 python -m app.cli create-owner --business "Name" --email you@x.com --name "You" [--opening-cash 25000 --opening-date 2026-11-01]
 ```
+
+## Demo data
+
+`python -m app.cli seed` is idempotent. Re-running it never duplicates customers, invoices, payments or bills, and
+existing records are left alone. Scenario dates (Ramesh's invoice due in 10 days, his commitment in 5, the overdue
+invoice, the upcoming bills) are relative to the day the demo business was **first** seeded, so they drift as days
+pass.
+
+To start the scenarios from today again, in **development or test only**:
+
+```bash
+python -m app.cli seed --reset      # or: docker compose run --rm --no-deps --entrypoint python api -m app.cli seed --reset
+```
+
+The reset only touches the business that has **both** the demo owner's email (`DEMO_OWNER_EMAIL`) and the name
+"KAIRA Demo Traders". It deletes that business's rows and then seeds again. It refuses in staging and production, and
+`--force` cannot override it there. It refuses an account that does not belong to the demo business. No other
+business is touched.

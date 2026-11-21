@@ -2,7 +2,10 @@
 
 Creates one demo business, its owner, customers (Ramesh with partial payment and a
 commitment, an overdue customer, a major customer), bills (one partially paid, others
-unpaid) and consistent cash movements. Dates are relative to the day the seed first runs.
+unpaid) and consistent cash movements. Dates are relative to the day the seed first runs, so the
+scenarios (due soon, overdue, upcoming commitment) drift as days pass. `reset_demo` (CLI:
+`python -m app.cli seed --reset`, development/test only) deletes the demo business so the next seed is
+anchored to today again.
 Every money movement goes through the same services as the API (cash + audit rows)."""
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -76,6 +79,47 @@ def _bill(db, actor, tag: str, **data) -> Bill:
     marker = f"[seed:{tag}]"
     existing = db.scalar(select(Bill).where(Bill.business_id == actor.business_id, Bill.notes == marker))
     return existing or bill_service.create_bill(db, actor, {**data, "notes": marker})
+
+
+# Children before parents, so RESTRICT foreign keys (payments -> invoices, invoices -> customers, ...)
+# are never hit. Every table here is scoped by business_id; refresh tokens and invoice items follow
+# their users / invoices through ON DELETE CASCADE.
+_RESET_ORDER = (
+    "payment_attempts",
+    "audit_logs",
+    "cash_transactions",
+    "payments",
+    "bill_payments",
+    "payment_commitments",
+    "proposed_actions",
+    "conversations",
+    "invoices",
+    "bills",
+    "customers",
+    "users",
+)
+
+
+def reset_demo(db: Session, *, owner_email: str) -> bool:
+    """Deletes the demo business (and only it) so the next seed starts from today's dates.
+
+    Development/test only; the CLI refuses it in staging/production. Matches the business by BOTH the demo
+    owner's email and DEMO_BUSINESS_NAME, so a real business can never be selected. Returns False when
+    there is no demo business to reset."""
+    owner = db.scalar(select(User).where(User.email == owner_email.lower()))
+    if owner is None:
+        return False
+    business = db.get(Business, owner.business_id)
+    if business is None or business.name != DEMO_BUSINESS_NAME:
+        raise ValueError(
+            f"Refusing to reset: {owner_email} does not belong to the demo business '{DEMO_BUSINESS_NAME}'."
+        )
+    for table in _RESET_ORDER:
+        db.execute(text(f"DELETE FROM {table} WHERE business_id = :b"), {"b": business.id})
+    db.execute(text("DELETE FROM businesses WHERE id = :b"), {"b": business.id})
+    db.flush()
+    logger.info("Demo business %s reset", business.id)
+    return True
 
 
 def seed_demo(db: Session, *, owner_email: str, owner_password: str, timezone: str = "Asia/Kolkata") -> dict:

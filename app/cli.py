@@ -84,6 +84,10 @@ def cmd_seed(args: argparse.Namespace) -> int:
     from app.seed import seed_demo
 
     s = _settings()
+    if args.reset and s.is_production_like:
+        # No override: a reset deletes data.
+        print("Refusing to reset demo data in staging/production.", file=sys.stderr)
+        return 2
     # Guard against seeding demo data into staging/production unless --force is passed.
     if s.is_production_like and not args.force:
         print("Refusing to seed demo data in staging/production (use --force to override).", file=sys.stderr)
@@ -97,6 +101,15 @@ def cmd_seed(args: argparse.Namespace) -> int:
         generated = True
     db = _session()
     try:
+        if args.reset:
+            from app.seed import reset_demo
+
+            try:
+                if reset_demo(db, owner_email=s.DEMO_OWNER_EMAIL):
+                    print("Demo business deleted; re-seeding anchored to today.")
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
         result = seed_demo(
             db, owner_email=s.DEMO_OWNER_EMAIL, owner_password=password, timezone=s.DEFAULT_TIMEZONE
         )
@@ -188,6 +201,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("migrate").set_defaults(func=cmd_migrate)
     p = sub.add_parser("seed")
     p.add_argument("--force", action="store_true")
+    p.add_argument(
+        "--reset",
+        action="store_true",
+        help="development/test only: delete the demo business first so scenario dates restart from today",
+    )
     p.set_defaults(func=cmd_seed)
     p = sub.add_parser("create-owner")
     p.add_argument("--business", required=True)
