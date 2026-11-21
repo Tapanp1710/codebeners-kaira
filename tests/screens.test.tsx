@@ -1,3 +1,8 @@
+/**
+ * Screen-level tests for navigation, payment recording, invoice creation and the assistant panel.
+ * Everything is rendered with renderApp, so API calls go through the real client (CSRF, envelope
+ * handling) to an in-test handler.
+ */
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -11,12 +16,14 @@ import type { Invoice } from "@/lib/api/types";
 import { envelope } from "./fixtures";
 import { pathOf, renderApp } from "./render";
 
+// Stub App Router hooks; ?customer=cust-1 mimics arriving at the invoice form from a customer page.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/invoices/new",
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useSearchParams: () => new URLSearchParams("customer=cust-1"),
 }));
 
+// Partially paid invoice with 12,000.00 outstanding, used by the payment tests.
 const invoice = {
   id: "inv-1",
   invoice_number: "INV-0001",
@@ -37,12 +44,14 @@ const invoice = {
 } as Invoice;
 
 describe("navigation", () => {
+  // The information architecture is fixed at five top-level destinations.
   it("has exactly the five primary destinations", () => {
     expect(NAV.map((n) => n.label)).toEqual(["Dashboard", "Customers & Invoices", "Receivables", "Cash-Flow Forecast", "What-If Analysis"]);
   });
 });
 
 describe("PaymentDialog", () => {
+  // Overpayment is caught client-side: no request is sent at all.
   it("blocks amounts above the outstanding balance before calling the API", async () => {
     const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />);
     await userEvent.type(screen.getByLabelText("Amount (₹)"), "12000.01");
@@ -51,6 +60,7 @@ describe("PaymentDialog", () => {
     expect(requests).toHaveLength(0);
   });
 
+  // Each submission carries an Idempotency-Key (retries cannot double-record); the confirmed balance shown is the backend's.
   it("records a partial payment with an idempotency key and shows the confirmed balance", async () => {
     const { requests } = renderApp(<PaymentDialog invoice={invoice} open onClose={() => {}} />, {
       handler: (req) =>
@@ -69,6 +79,7 @@ describe("PaymentDialog", () => {
 });
 
 describe("InvoiceForm", () => {
+  // The estimate uses exact decimals (3 x 1250.50 + 0.10 = 3,751.60) and amounts are posted as strings, as the contract requires.
   it("shows a running estimate with exact decimals and posts the contract body", async () => {
     const { requests } = renderApp(<InvoiceForm />, {
       handler: (req) => {
@@ -102,6 +113,7 @@ describe("InvoiceForm", () => {
     });
   });
 
+  // Client-side validation blocks submission of an incomplete form.
   it("validates required fields before submitting", async () => {
     const { requests } = renderApp(<InvoiceForm />, { handler: () => envelope({ items: [], total: 0, page: 1, page_size: 200 }) });
     await userEvent.selectOptions(screen.getByLabelText("Customer"), "");
@@ -113,11 +125,13 @@ describe("InvoiceForm", () => {
 });
 
 describe("AssistantPanel", () => {
+  // /ready reports voice_provider "not_configured"; the panel uses it to decide what to offer.
   const readyHandler = (req: Request) =>
     pathOf(req) === "GET /ready"
       ? envelope({ status: "ready", checks: { voice_provider: "not_configured", extraction_provider: "rules" } })
       : envelope({});
 
+  // Global fetch is stubbed as well as the client transport so /ready resolves whichever path reads it.
   it("states honestly that voice needs the Sarvam key on the server", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => readyHandler(new Request(new URL(url, "http://localhost")))));
     renderApp(<AssistantPanel />, { handler: readyHandler });
@@ -125,6 +139,7 @@ describe("AssistantPanel", () => {
     vi.unstubAllGlobals();
   });
 
+  // A getUserMedia rejection (NotAllowedError) must surface as an error state, not a fake "listening" UI.
   it("reports a denied microphone instead of pretending to record", async () => {
     Object.defineProperty(globalThis, "MediaRecorder", { value: class {}, configurable: true });
     Object.defineProperty(navigator, "mediaDevices", {
@@ -137,6 +152,7 @@ describe("AssistantPanel", () => {
     expect(screen.getByTestId("orb-state")).toHaveTextContent("error");
   });
 
+  // No navigator.mediaDevices at all (old browser or insecure context) is reported to the user.
   it("reports an unsupported browser", async () => {
     Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
     renderApp(<AssistantPanel />, { handler: readyHandler });
@@ -144,6 +160,7 @@ describe("AssistantPanel", () => {
     expect(await screen.findByText(/cannot record audio/)).toBeInTheDocument();
   });
 
+  // Typed fallback: posts the exact /assistant/extract body (input_mode "text") and shows the backend's answer.
   it("sends a typed request to /assistant/extract and renders the answer", async () => {
     const { requests } = renderApp(<AssistantPanel />, {
       handler: (req) =>

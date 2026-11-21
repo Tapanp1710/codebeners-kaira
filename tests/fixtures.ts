@@ -1,5 +1,10 @@
+/**
+ * Shared test data shaped like real backend payloads (types from lib/api/types, which follow the
+ * OpenAPI contract), so component tests exercise the same shapes the UI receives in production.
+ */
 import type { ProposedAction, Session } from "@/lib/api/types";
 
+// Owner session: the role allowed to approve/reject proposals. Tests expect "csrf-test" on unsafe requests.
 export const ownerSession = {
   user: { id: "u1", business_id: "b1", name: "Demo Owner", email: "demo@kaira.local", role: "owner", is_active: true },
   business: {
@@ -19,6 +24,7 @@ export const ownerSession = {
   access_token_expires_at: "2026-11-21T12:00:00Z",
 } as Session;
 
+// Same session with role "staff", used to check that owner-only controls are hidden.
 export const staffSession = { ...ownerSession, user: { ...ownerSession.user, role: "staff" } } as Session;
 
 /** Shape returned by the real backend for the demo phrase (captured from the API contract). */
@@ -33,6 +39,7 @@ export function demoProposal(overrides: Partial<ProposedAction> = {}): ProposedA
     provider: "rules",
     confidence_level: "high",
     operations: [
+      // Two operations from one sentence: the payment, then a promise for the remainder computed by the backend.
       {
         index: 0,
         type: "record_payment",
@@ -52,6 +59,7 @@ export function demoProposal(overrides: Partial<ProposedAction> = {}): ProposedA
         computed: { remaining_amount: "7000.00", supersedes_existing_commitments: true },
       },
     ],
+    // Each extracted field linked to the transcript fragment it came from, as displayed on the proposal card.
     evidence: [
       { field: "customer_name", fragment: "Ramesh", verified: true, operation_index: 0 },
       { field: "amount", fragment: "5,000", verified: true, operation_index: 0 },
@@ -66,10 +74,12 @@ export function demoProposal(overrides: Partial<ProposedAction> = {}): ProposedA
     executed_at: null,
     created_at: "2026-11-21T10:00:00Z",
     updated_at: "2026-11-21T10:00:00Z",
+    // Tests override individual fields (status, warnings, can_approve, ...) to reach other card states.
     ...overrides,
   } as ProposedAction;
 }
 
+// Response builders for mocked transport handlers (success and error envelope forms).
 export const envelope = (data: unknown, status = 200) =>
   new Response(JSON.stringify({ success: true, data, error: null }), { status, headers: { "content-type": "application/json" } });
 export const errorEnvelope = (status: number, code: string, message: string) =>

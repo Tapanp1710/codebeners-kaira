@@ -1,9 +1,15 @@
+/**
+ * End-to-end workflows against a real KAIRA backend through the production build (see
+ * playwright.config.ts). Tests that write data create their own uniquely named customer, so the
+ * suite can be re-run against the same backend without clean-up or seed data.
+ */
 import { expect, test, type Page } from "@playwright/test";
 
 import { apiGet, EMAIL, login, PASSWORD, uniqueName } from "./helpers";
 
 type Customer = { id: string; outstanding: string; commitments: { status: string; amount: string }[] };
 
+/** Creates a customer and an 18,000.00 invoice through the UI (not the API) and returns both ids. */
 async function createCustomerWithInvoice(page: Page, name: string, total = "18000") {
   await page.goto("/customers");
   await page.getByRole("button", { name: "New customer" }).click();
@@ -11,12 +17,14 @@ async function createCustomerWithInvoice(page: Page, name: string, total = "1800
   await dialog.getByLabel("Name").fill(name);
   await dialog.getByLabel("Phone").fill("9876543210");
   await dialog.getByRole("button", { name: "Add customer" }).click();
+  // Backend ids are UUIDs; the URL change confirms the create succeeded.
   await page.waitForURL(/\/customers\/[0-9a-f-]{36}$/);
   await expect(page.locator("main h1")).toHaveText(name);
   const customerId = page.url().split("/").pop()!;
 
   await page.getByRole("link", { name: "New invoice" }).click();
   await page.waitForURL(/\/invoices\/new/);
+  // Arriving from the customer page pre-selects that customer on the invoice form.
   await expect(page.getByLabel("Customer")).toHaveValue(customerId);
   await page.getByLabel("Item 1 description").fill("Basmati rice bags");
   await page.getByLabel("Quantity").fill("6");
@@ -28,6 +36,7 @@ async function createCustomerWithInvoice(page: Page, name: string, total = "1800
   return { customerId, invoiceId: page.url().split("/").pop()! };
 }
 
+// Auth: cookie session through the proxy, invisible to page JavaScript, with CSRF enforced by the backend.
 test.describe("authentication", () => {
   test("protected routes redirect to login; bad password is rejected; logout ends the session", async ({ page }) => {
     await page.goto("/receivables");
@@ -42,6 +51,7 @@ test.describe("authentication", () => {
     const access = cookies.find((c) => c.name === "kaira_access")!;
     const refresh = cookies.find((c) => c.name === "kaira_refresh")!;
     expect(access.httpOnly && refresh.httpOnly).toBe(true);
+    // Refresh cookie scoped to the proxied auth path (rewritten by lib/server/proxy.ts).
     expect(refresh.path).toBe("/api/backend/api/v1/auth");
     expect(await page.evaluate(() => document.cookie)).not.toContain("kaira_"); // invisible to JS
 
@@ -53,6 +63,7 @@ test.describe("authentication", () => {
     await expect(page.getByLabel("Email")).toBeVisible();
   });
 
+  // Keeps only the refresh cookie to simulate an expired access token: navigation must recover without a login prompt.
   test("an expired access cookie is renewed silently; a lost session returns to login", async ({ page, context }) => {
     await login(page, "/dashboard");
     const refresh = (await context.cookies()).find((c) => c.name === "kaira_refresh")!;
@@ -68,6 +79,7 @@ test.describe("authentication", () => {
     await expect(page.getByLabel("Email")).toBeVisible();
   });
 
+  // Calls the proxy directly with cookies but no X-CSRF-Token: the backend must answer 403 CSRF_FAILED.
   test("unsafe API calls without the CSRF header are refused by the backend through the proxy", async ({ page }) => {
     await login(page);
     const res = await page.request.post("/api/backend/api/v1/customers", { data: { name: "No CSRF" } });
@@ -77,6 +89,7 @@ test.describe("authentication", () => {
 });
 
 test.describe("customers, invoices and payments", () => {
+  // Money path: overpayment blocked in the UI, then a partial payment reflected in the invoice, receivables, dashboard and API.
   test("create customer, invoice and partial payment; receivables and dashboard refresh", async ({ page }) => {
     await login(page);
     const name = uniqueName();
@@ -109,6 +122,7 @@ test.describe("customers, invoices and payments", () => {
 });
 
 test.describe("assistant and approvals", () => {
+  // Both outcomes of the approval gate: rejection changes nothing; edit + approve writes payment, promise and audit entries.
   test("typed request -> proposal -> edit -> approve updates the books; a second proposal is rejected", async ({ page }) => {
     await login(page);
     const name = uniqueName();
@@ -173,6 +187,7 @@ test.describe("assistant and approvals", () => {
     await expect(page.getByTestId("customer-commitments")).toContainText("₹7,000.00");
   });
 
+  // Fake media devices (playwright.config.ts) let recording run headless. The end state depends on whether the backend has a Sarvam key; typed input must stay usable either way.
   test("voice: explicit recording, honest provider error, typed fallback still available", async ({ page }) => {
     await login(page);
     await page.getByTestId("assistant-launcher").click();
@@ -193,6 +208,7 @@ test.describe("assistant and approvals", () => {
     await expect(panel.getByTestId("assistant-input")).toBeEditable();
   });
 
+  // Answers and reminder drafts must use the backend's figures (the 18,000.00 invoice); the draft says KAIRA never sends it.
   test("question is answered from backend data and a reminder draft uses real figures", async ({ page }) => {
     await login(page);
     const name = uniqueName();
@@ -214,6 +230,7 @@ test.describe("assistant and approvals", () => {
 });
 
 test.describe("forecast and what-if", () => {
+  // Forecast milestones render, and running a what-if scenario leaves the stored forecast unchanged.
   test("forecast shows 30/60/90 projections; simulation is hypothetical and changes nothing", async ({ page }) => {
     await login(page);
     await page.goto("/cashflow");
@@ -238,6 +255,7 @@ test.describe("forecast and what-if", () => {
     await expect(page.getByText("No scenario running")).toBeVisible();
   });
 
+  // Phone-sized viewport: navigation moves into a drawer and the page must not scroll horizontally.
   test("mobile layout: navigation drawer and readable tables", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page);

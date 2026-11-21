@@ -1,3 +1,8 @@
+/**
+ * Component tests for the voice orb, the payment status badge and the proposal (approval) card.
+ * The proposal card is the safety gate between AI extraction and the books: these tests pin that
+ * nothing is recorded until the owner approves and the backend confirms.
+ */
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { render } from "@testing-library/react";
@@ -10,12 +15,14 @@ import { VoiceOrb, type OrbState } from "@/components/voice/voice-orb";
 import { demoProposal, envelope, errorEnvelope, staffSession } from "./fixtures";
 import { pathOf, renderApp } from "./render";
 
+// Components use Next's router hooks; there is no App Router in jsdom, so they are stubbed.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/customers",
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
 }));
 
+// The orb drives recording, so its state must be exposed to assistive tech (status text, aria-pressed, accessible name).
 describe("VoiceOrb", () => {
   it.each<[OrbState, string]>([
     ["idle", "Tap to speak"],
@@ -33,6 +40,7 @@ describe("VoiceOrb", () => {
     expect(button).toHaveAttribute("aria-pressed", String(state === "listening"));
   });
 
+  // No auto-recording: the microphone is used only after an explicit press.
   it("only records on an explicit press", async () => {
     const onPress = vi.fn();
     render(<VoiceOrb state="idle" onPress={onPress} />);
@@ -42,6 +50,7 @@ describe("VoiceOrb", () => {
   });
 });
 
+// Partial payment and overdue state must both be visible at once.
 describe("PaymentStatusBadge", () => {
   it("shows status and overdue days", () => {
     render(<PaymentStatusBadge status="partially_paid" overdue daysOverdue={20} />);
@@ -50,7 +59,9 @@ describe("PaymentStatusBadge", () => {
   });
 });
 
+// ProposalCard: everything the owner needs to decide is shown, and only the backend's answer decides the outcome.
 describe("ProposalCard", () => {
+  // Renders the demo proposal from fixture data: intents, resolved customer/invoice, amounts, computed balances, promised date, evidence, confidence.
   it("presents the demo proposal: intent, customer, invoice, amounts, promise, evidence, confidence", () => {
     renderApp(<ProposalCard action={demoProposal()} />);
     expect(screen.getByTestId("proposal-transcript")).toHaveTextContent("Ramesh paid me 5,000 rupees today");
@@ -67,6 +78,7 @@ describe("ProposalCard", () => {
     expect(within(ops[1]).getByText(/“next Monday”/)).toBeInTheDocument();
   });
 
+  // No optimistic success: while approve is pending the button is disabled (no double submit) and the result appears only after the backend resolves. Approve is a CSRF-protected POST.
   it("shows success only after the backend confirms execution, and refreshes data", async () => {
     let resolveApprove!: (r: Response) => void;
     const { requests } = renderApp(<ProposalCard action={demoProposal()} />, {
@@ -95,6 +107,7 @@ describe("ProposalCard", () => {
     expect(requests.find((r) => pathOf(r) === "POST /actions/a1/approve")!.headers.get("x-csrf-token")).toBe("csrf-test");
   });
 
+  // A failed approval keeps the card pending and shows the backend's message.
   it("shows the backend error and stays pending when approval fails", async () => {
     renderApp(<ProposalCard action={demoProposal()} />, {
       handler: (req) =>
@@ -107,6 +120,7 @@ describe("ProposalCard", () => {
     expect(screen.getByTestId("proposal-card")).toHaveAttribute("data-status", "pending");
   });
 
+  // Reject only calls the reject endpoint; no financial write (e.g. POST /invoices) is made.
   it("rejects without touching financial data", async () => {
     const { requests } = renderApp(<ProposalCard action={demoProposal()} />, {
       handler: (req) =>
@@ -119,6 +133,7 @@ describe("ProposalCard", () => {
     expect(requests.map(pathOf)).not.toContain("POST /invoices");
   });
 
+  // can_approve=false from the backend disables Approve and the reason is displayed.
   it("disables approval while blocking issues remain and explains why", () => {
     renderApp(
       <ProposalCard
@@ -134,6 +149,7 @@ describe("ProposalCard", () => {
     expect(screen.getByText(/Approval is disabled/)).toBeInTheDocument();
   });
 
+  // Owner-only controls are hidden from staff; the backend enforces the same rule (403 FORBIDDEN) regardless.
   it("hides approve/reject from staff (backend still enforces)", () => {
     renderApp(<ProposalCard action={demoProposal()} />, { session: staffSession });
     expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
@@ -141,6 +157,7 @@ describe("ProposalCard", () => {
     expect(screen.getByText(/Only the business owner can approve/)).toBeInTheDocument();
   });
 
+  // Edits send the complete operation list (with resolved ids), not a diff; the backend then flags the action as edited.
   it("edits the amount and sends the full operation list to PATCH /actions/{id}", async () => {
     const { requests } = renderApp(<ProposalCard action={demoProposal()} />, {
       handler: (req) => (req.method === "PATCH" ? envelope(demoProposal({ warnings: [{ code: "EDITED_BY_OWNER", message: "Values were edited by the owner after extraction.", operation_index: null, blocking: false }] })) : envelope({ items: [], total: 0, page: 1, page_size: 200 })),

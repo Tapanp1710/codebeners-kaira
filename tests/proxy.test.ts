@@ -1,17 +1,26 @@
 // @vitest-environment node
+/**
+ * Security and fidelity tests for the same-origin backend proxy (lib/server/proxy.ts), through which
+ * every browser API call passes. Runs in the Node environment (pragma above) because the proxy is
+ * server code relying on Node's fetch primitives such as Headers.getSetCookie(). The backend is
+ * replaced by an injected fetchImpl, so no network is used.
+ */
 import { describe, expect, it, vi } from "vitest";
 
 import { forwardedRequestHeaders, proxyToBackend, rewriteSetCookie, upstreamPath } from "@/lib/server/proxy";
 
 const ORIGIN = "http://backend.internal:8000";
 
+/** Fake backend response; cookies are appended one by one so several Set-Cookie headers exist, as from the real backend. */
 function upstream(body: BodyInit | null, init: ResponseInit & { cookies?: string[] } = {}) {
   const headers = new Headers(init.headers);
   for (const c of init.cookies ?? []) headers.append("set-cookie", c);
   return new Response(body, { status: init.status ?? 200, headers });
 }
 
+// Cookie rewriting keeps auth cookies first-party: the browser only sees /api/backend/... paths, and a backend Domain must never pin a cookie to the backend host.
 describe("rewriteSetCookie", () => {
+  // The refresh cookie must be scoped to the proxied auth path, or the browser would never send it to /api/backend/api/v1/auth/refresh.
   it("rewrites API paths to the proxy prefix and keeps security attributes", () => {
     const out = rewriteSetCookie("kaira_refresh=abc; HttpOnly; Max-Age=604800; Path=/api/v1/auth; SameSite=lax; Secure");
     expect(out).toBe("kaira_refresh=abc; HttpOnly; Max-Age=604800; Path=/api/backend/api/v1/auth; SameSite=lax; Secure");
@@ -23,6 +32,7 @@ describe("rewriteSetCookie", () => {
   });
 });
 
+// Path allow-list: the proxy must not relay to backend docs, the OpenAPI spec, other API versions or ".." traversal.
 describe("upstreamPath", () => {
   it("allows only /api/v1 paths", () => {
     expect(upstreamPath(["api", "v1", "customers"])).toBe("api/v1/customers");
@@ -33,6 +43,7 @@ describe("upstreamPath", () => {
   });
 });
 
+// Header allow-list: client-supplied Authorization, Host and X-Forwarded-* are dropped (no token injection or host spoofing); X-Forwarded-For comes only from the clientIp argument.
 describe("forwardedRequestHeaders", () => {
   it("forwards only the allow-listed headers", () => {
     const h = forwardedRequestHeaders(
@@ -56,7 +67,9 @@ describe("forwardedRequestHeaders", () => {
   });
 });
 
+// Full proxied calls with the upstream fetch mocked.
 describe("proxyToBackend", () => {
+  // Backend status codes and error envelopes reach the client unchanged; responses are forced to no-store so authenticated data is not cached.
   it("forwards method, query, headers and JSON body; preserves status and envelope", async () => {
     const fetchImpl = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
       expect(String(url)).toBe(`${ORIGIN}/api/v1/customers?search=ram&page=2`);
@@ -82,6 +95,7 @@ describe("proxyToBackend", () => {
     expect((await res.json()).error.code).toBe("VALIDATION_ERROR");
   });
 
+  // Login sets two cookies; joining Set-Cookie values with commas is ambiguous (Expires dates contain commas), so each must stay a separate header.
   it("keeps multiple Set-Cookie headers separate (never comma-joined) and rewrites paths", async () => {
     const fetchImpl = vi.fn(async () =>
       upstream("{}", {
@@ -103,6 +117,7 @@ describe("proxyToBackend", () => {
     expect(cookies[1]).toBe("kaira_refresh=BBB; HttpOnly; Max-Age=604800; Path=/api/backend/api/v1/auth; SameSite=lax");
   });
 
+  // Voice upload: the body is forwarded as raw bytes, so the multipart boundary in Content-Type still matches the payload.
   it("forwards multipart audio uploads byte-for-byte with the original boundary", async () => {
     const form = new FormData();
     form.append("file", new Blob([new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3])], { type: "audio/webm" }), "rec.webm");
@@ -120,6 +135,7 @@ describe("proxyToBackend", () => {
     expect(contentType).toMatch(/^multipart\/form-data; boundary=/);
   });
 
+  // TTS audio comes back as binary; it must pass through without any text decoding.
   it("passes binary response bodies through unchanged", async () => {
     const bytes = new Uint8Array([82, 73, 70, 70, 0, 255, 128]);
     const fetchImpl = vi.fn(async () => upstream(bytes, { headers: { "content-type": "audio/wav" } }));
@@ -128,6 +144,7 @@ describe("proxyToBackend", () => {
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(bytes);
   });
 
+  // Backend down -> 502 in the standard envelope, without exposing the internal BACKEND_ORIGIN host to the browser.
   it("returns BACKEND_UNAVAILABLE when the backend cannot be reached", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("fetch failed");
@@ -139,6 +156,7 @@ describe("proxyToBackend", () => {
     expect(JSON.stringify(body)).not.toContain("backend.internal"); // internal URL is never leaked
   });
 
+  // Timeouts are distinguished from outages (504 BACKEND_TIMEOUT vs 502 BACKEND_UNAVAILABLE).
   it("returns BACKEND_TIMEOUT when the backend is too slow", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new DOMException("timed out", "TimeoutError");
@@ -148,6 +166,7 @@ describe("proxyToBackend", () => {
     expect((await res.json()).error.code).toBe("BACKEND_TIMEOUT");
   });
 
+  // Disallowed paths are rejected locally with 404 before any upstream request is made.
   it("refuses paths outside /api/v1 without calling the backend", async () => {
     const fetchImpl = vi.fn();
     const res = await proxyToBackend(new Request("http://app.local/x"), ["docs"], { origin: ORIGIN, timeoutMs: 10, fetchImpl });
