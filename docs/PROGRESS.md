@@ -41,3 +41,23 @@ Based on `docs/backend-comment-annotations` (`b40315e`), which preserves comment
 | B6 Security review | Done: no new high-severity issues beyond B1 and B5 (both fixed); findings table in docs/SECURITY.md; CSRF regression test for payment-attempt writes | `test_csrf_is_required_for_attempt_writes` |
 | B7 Account management | Assessed: no e-mail service, so no fake reset or invite flow. Added `cli create-user` (staff/owner in an existing owner's business, audited, password from env or prompt) | `tests/integration/test_cli_users.py`; suite 181 passed |
 | Phase 4 Handoff | Done: API 1.1.0 (43 paths, 117 schemas); `docs/openapi.json` regenerated and checked; API_CONTRACT, DATABASE_SCHEMA and INTEGRATION_HANDOFF updated | export-openapi diff clean; suite 181 passed |
+| Phases 5–8 (frontend, kaira-frontend `feat/server-payment-recovery`) | Done: contract 1.1.0 imported; server-side recovery; pending visibility; proxy hardening; contract script; line-item errors; pagination; logout privacy; voice test fixed | 122 unit tests; Playwright 18/18 against a disposable backend built from this branch (incl. cross-device and `RUN_ACCEPTANCE=1`) |
+| Phase 9 final verification | 181 passed; ruff check/format clean; OpenAPI current; migrations base→head→base→head and `alembic check` clean; Docker image builds | local run, 2026-11-22 |
+
+### Remaining (external or owner decisions)
+
+* **Live Sarvam:** STT, LLM extraction and TTS in Telugu, Hindi and English are not verified, because `SARVAM_API_KEY` is
+  absent. Mocked provider tests and the typed fallback pass.
+* **GitHub Actions:** never run (nothing was pushed). The workflow YAML parses, and the same steps pass locally.
+* **E-mail:** there is no provider, so there's no password reset or invitations. `cli create-user` covers account
+  creation.
+* **Deployment:** not deployed. Hosting, TLS, `FORWARDED_ALLOW_IPS` and the frontend's `TRUSTED_CLIENT_IP_HEADER`
+  are decisions for the owner.
+
+### Resume
+
+```bash
+git checkout feat/payment-integrity        # backend; base docs/backend-comment-annotations
+docker compose up -d db
+.venv/Scripts/python -m pytest -q          # expects 181 passed
+```

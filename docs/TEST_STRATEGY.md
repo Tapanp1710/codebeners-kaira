@@ -18,6 +18,14 @@ python -m pytest -q            # or scripts/verify.(ps1|sh) for every gate
 | `tests/api/test_forecast.py` | forecast maths, no double counting, overdue assumption, shortfalls, simulation **non-mutation**, dashboard, opening-cash rule |
 | `tests/api/test_assistant.py` | demo phrase → proposal, approval execution, **duplicate and concurrent approval**, rejection, edit, ambiguous customer/invoice, overpayment blocking, prompt injection, staff rules, queries, reminders, missing provider config, upload validation, **mocked** Sarvam STT/LLM/TTS/errors/timeouts/hallucination |
 | `tests/integration/test_demo_workflow.py` | seed idempotency and the mandatory end-to-end scenario (spec §17.3) through HTTP |
+| `tests/api/test_payment_idempotency.py` | request fingerprints: exact replay, a 422 for each changed field, canonicalisation, omitted date, replay after full payment, rollback, legacy rows, **concurrent exact/conflicting/cross-invoice requests** (invoice and bill) |
+| `tests/api/test_payment_attempts.py` | payment-attempt registry: registration replay and conflict, linking a recorded key, **another device** (separate client and user), **server restart** (new app instance), crash before commit, replay after full invoice/bill payment, rejection, unauthenticated and cross-business access, CSRF, **concurrent registration, retry and execute-vs-cancel**, safe/refused/reconciling cancellation |
+| `tests/api/test_rate_limit_shared.py` | PostgreSQL rate limiter shared by two engines, by **three separate OS processes**, and across two app instances (login); payment write limit |
+| `tests/integration/test_seed_reset.py`, `tests/integration/test_cli_users.py` | seed repeatability, the dev-only reset (re-anchors dates; refuses non-demo businesses and production), `create-user` |
+
+Frontend ↔ backend acceptance (2026-11-22): the kaira-frontend Playwright suite ran 18/18 against a disposable backend
+built from this branch, including cross-device payment recovery and `RUN_ACCEPTANCE=1`. A SQL check afterwards
+confirmed one payment per key and one cash movement per payment (see kaira-frontend docs/STATUS.md).
 
 Mocked provider tests are labelled as mocked. A live Sarvam test needs `SARVAM_API_KEY` and has **not**
 been run (see INTEGRATION_STATUS.md).
