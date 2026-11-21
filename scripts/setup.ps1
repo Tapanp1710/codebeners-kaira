@@ -6,6 +6,7 @@
   Skip lint/typecheck/unit tests (faster first run).
 #>
 param([switch]$SkipChecks)
+# Dot-source the shared helpers so their functions and $script: variables live in this script's scope.
 . "$PSScriptRoot\common.ps1"
 Set-Location $script:FrontendRoot
 
@@ -13,10 +14,12 @@ Write-Step 'Checking prerequisites'
 Assert-Node
 
 Write-Step 'Installing locked dependencies (npm ci)'
+# npm ci installs exactly what package-lock.json pins and fails if it is out of sync with package.json.
 Invoke-Checked 'Dependencies installed from package-lock.json' { npm ci --no-audit --no-fund }
 
 Write-Step 'Preparing .env.local'
 $envFile = Join-Path $script:FrontendRoot '.env.local'
+# An existing .env.local is never overwritten.
 if (-not (Test-Path $envFile)) {
     Copy-Item (Join-Path $script:FrontendRoot '.env.example') $envFile
     Write-Ok 'Created .env.local from .env.example - set BACKEND_ORIGIN to your backend address'
@@ -33,6 +36,7 @@ if (-not $SkipChecks) {
     Invoke-Checked 'Unit and component tests' { npm run -s test }
 }
 
+# Informational only: the connectivity probe's exit code is not checked, so setup completes with the backend down.
 Write-Step 'Backend connectivity'
 node scripts/check-env.mjs --connect
 

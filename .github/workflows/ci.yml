@@ -1,3 +1,4 @@
+# Frontend CI: quality gates on pushes to main and feat/** branches and on every pull request.
 name: frontend-ci
 
 on:
@@ -5,10 +6,12 @@ on:
     branches: [main, "feat/**"]
   pull_request:
 
+# Least privilege: the workflow token can only read repository contents.
 permissions:
   contents: read
 
 jobs:
+  # Gate job: the docker and e2e jobs both depend on it (needs: checks).
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -17,18 +20,24 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Exact install from package-lock.json.
       - run: npm ci --no-audit --no-fund
+      # Validates the committed .env.example as if it were .env.local (valid BACKEND_ORIGIN, no secrets in NEXT_PUBLIC_ or backend-only keys).
       - name: Environment template is valid
         run: cp .env.example .env.local && node scripts/check-env.mjs
+      # No BACKEND_ORIGIN is set in this job, so the live-backend comparison is skipped; spec hash and generated types must still match.
       - name: Contract and generated types are consistent
         run: node scripts/contract.mjs check
+      # ESLint with --max-warnings=0, then next typegen + tsc --noEmit, Vitest unit/component tests and a production build.
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Fails on high or critical advisories in runtime dependencies only; devDependencies are excluded.
       - name: Dependency audit (production dependencies)
         run: npm audit --omit=dev --audit-level=high
 
+  # Proves the production image builds; it is neither run nor pushed here.
   docker:
     runs-on: ubuntu-latest
     needs: checks
@@ -40,7 +49,9 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     needs: checks
+    # Runs only when the repository variable E2E_BACKEND_ORIGIN is set; otherwise the job is skipped, not failed.
     if: ${{ vars.E2E_BACKEND_ORIGIN != '' }}
+    # The backend origin is a plain repository variable; the owner login comes from encrypted secrets.
     env:
       BACKEND_ORIGIN: ${{ vars.E2E_BACKEND_ORIGIN }}
       E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
@@ -52,9 +63,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
+      # Browser binary plus OS dependencies; Chromium only, matching the single project in playwright.config.ts.
       - run: npx playwright install --with-deps chromium
+      # playwright.config.ts starts `next start` itself, so a production build must exist first.
       - run: npm run build
       - run: npx playwright test
+      # On failure the HTML report is uploaded as an artifact for debugging.
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
