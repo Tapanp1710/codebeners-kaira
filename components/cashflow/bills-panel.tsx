@@ -13,7 +13,8 @@
  * Money is handled as decimal strings throughout; comparisons use exact BigInt helpers, never floats.
  */
 import { Plus } from "lucide-react";
-import { useRef, useState, type FormEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 
 import { useSession, useToast } from "@/components/providers";
 import { Dialog } from "@/components/ui/dialog";
@@ -21,12 +22,17 @@ import { DataTable, Money, PAYMENT_METHOD_LABEL, PaymentStatusBadge, td, tdNum, 
 import { Field, FormError, Input, Select } from "@/components/ui/form";
 import { Button, Card, CardHeader, EmptyState, ErrorState, LoadingBlock, Notice } from "@/components/ui/primitives";
 import { describeError } from "@/lib/api/errors";
-import { newIdempotencyKey, useBills, useCreateBill, usePayBill } from "@/lib/api/hooks";
+import { invalidateFinancial, newIdempotencyKey, useBills, useCreateBill, usePayBill } from "@/lib/api/hooks";
 import {
-  clearBillPaymentAttempt,
+  confirmBillPaymentAttempt,
+  createBillPaymentAttempt,
   isDefinitiveRejection,
+  listPendingBillIds,
   loadBillPaymentAttempt,
-  saveBillPaymentAttempt,
+  loadBillPaymentDone,
+  rejectBillPaymentAttempt,
+  subscribeBillPaymentAttempts,
+  withBillPaymentLock,
   type BillPaymentAttempt,
 } from "@/lib/api/payment-attempt";
 import type { Bill, PaymentMethod } from "@/lib/api/types";
@@ -94,83 +100,172 @@ function NewBillDialog({ open, onClose }: { open: boolean; onClose: () => void }
  * is selected.
  *
  * Idempotency: the first submit freezes the Idempotency-Key and the exact request body into an attempt
- * (lib/api/payment-attempt.ts), saved to sessionStorage before the request is sent. The attempt is released
+ * (lib/api/payment-attempt.ts), saved to localStorage before the request is sent. The attempt is released
  * only when the backend confirms an outcome: success (recorded or replayed) or a definitive 4xx rejection.
  * After a network error, timeout or 5xx the outcome is unknown, so the fields lock and "Retry payment"
  * resends the same key and body; the backend then records the payment once or replays the original.
- * Reopening the dialog (including after a reload) restores a pending attempt for this bill.
+ * An uncertain attempt cannot be discarded. Closing the dialog keeps it; reopening the bill (after a
+ * reload, a closed tab or a browser restart, or from another tab) restores it.
+ *
+ * Cross-tab: submits for a bill run under a per-bill Web Lock and re-read storage inside it, so a tab never
+ * creates a second attempt next to a pending one and never resends an attempt another tab already resolved.
+ * Changes from other tabs are followed live (adopt a new pending attempt, close on confirmation).
  */
 function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
   const { session } = useSession();
   const toast = useToast();
+  const qc = useQueryClient();
   const pay = usePayBill(bill.id);
-  const userId = session?.user.id ?? "anonymous";
-  // An attempt whose outcome is still unknown (restored from sessionStorage on mount, if any).
-  const [attempt, setAttempt] = useState<BillPaymentAttempt | null>(() => loadBillPaymentAttempt(userId, bill.id));
+  const businessId = session?.business.id ?? "unknown";
+  const userId = session?.user.id ?? "unknown";
+  // Completion markers newer than this were written while the dialog was open, i.e. by another tab.
+  const [openedAt] = useState(() => Date.now());
+  // An attempt whose outcome is still unknown (restored from storage on mount, if any).
+  const [attempt, setAttemptState] = useState<BillPaymentAttempt | null>(() => loadBillPaymentAttempt(businessId, bill.id));
+  // Mirrors `attempt` synchronously for the storage listener and the locked submit path.
+  const attemptRef = useRef(attempt);
   // Pre-filled with the pending attempt's values, otherwise the full remaining balance (a decimal string).
   const [amount, setAmount] = useState(() => (attempt ? String(attempt.body.amount) : bill.outstanding));
   const [date, setDate] = useState(() => attempt?.body.payment_date ?? todayIn(session?.business.timezone));
   const [method, setMethod] = useState<PaymentMethod>(() => attempt?.body.payment_method ?? "bank_transfer");
   const [error, setError] = useState<string | null>(null);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
-  // Synchronous guard against a second submit (double click, Enter) before `pay.isPending` re-renders.
+  const [submitting, setSubmitting] = useState(false);
+  // Synchronous guard against a second submit (double click, Enter) before `submitting` re-renders.
   const inFlight = useRef(false);
+
+  function setAttempt(a: BillPaymentAttempt | null) {
+    attemptRef.current = a;
+    setAttemptState(a);
+  }
+
+  /** Shows a pending attempt (possibly created by another tab) with its frozen values. */
+  function adopt(a: BillPaymentAttempt) {
+    setAttempt(a);
+    setAmount(String(a.body.amount));
+    setDate(a.body.payment_date ?? todayIn(session?.business.timezone));
+    setMethod(a.body.payment_method);
+  }
+
+  /**
+   * Reconciles this dialog with storage after the attempt it shows was changed elsewhere. Returns true when
+   * the dialog closed because the payment was confirmed.
+   */
+  function syncFromStorage(): boolean {
+    const stored = loadBillPaymentAttempt(businessId, bill.id);
+    const shown = attemptRef.current;
+    if (stored && stored.key !== shown?.key) {
+      adopt(stored);
+      setError(null);
+      return false;
+    }
+    if (!stored && shown) {
+      if (loadBillPaymentDone(businessId, bill.id)?.key === shown.key) {
+        toast(`This payment to ${bill.vendor_name} was confirmed in another tab; it was recorded once.`);
+        invalidateFinancial(qc);
+        onClose();
+        return true;
+      }
+      // Released elsewhere after a definitive rejection: nothing was recorded, so the form unlocks.
+      setAttempt(null);
+      setError("The pending payment was rejected by the server in another tab. Review the details and submit again.");
+    }
+    return false;
+  }
+
+  // Follow attempt changes from other tabs while open. Our own writes happen while `inFlight` is set and
+  // are handled by onSubmit, so they are ignored here.
+  useEffect(
+    () =>
+      subscribeBillPaymentAttempts(() => {
+        if (!inFlight.current) syncFromStorage();
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-subscribing per render is unnecessary; the listener reads refs and storage.
+    [businessId, bill.id],
+  );
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (inFlight.current) return;
-    setError(null);
-    setConfirmDiscard(false);
-    let current = attempt;
-    if (!current) {
-      if (!isValidAmount(amount)) return setError("Enter a positive amount with up to 2 decimals.");
-      // Overpayment guard using exact decimal comparison against the outstanding shown in the dialog.
-      if (compareMoney(amount, bill.outstanding) > 0) return setError(`Cannot exceed the remaining ${formatMoney(bill.outstanding)}.`);
-      current = { key: newIdempotencyKey(), billId: bill.id, body: { amount, payment_date: date, payment_method: method }, startedAt: new Date().toISOString() };
-      saveBillPaymentAttempt(userId, current);
-      setAttempt(current);
-    }
-    // A retry skips the client-side checks on purpose: the body was validated when the attempt was created,
-    // and if the first request was recorded the bill's outstanding is now lower, which would wrongly block
-    // the retry that the backend would answer with a replay.
     inFlight.current = true;
+    setSubmitting(true);
+    setError(null);
     try {
-      const result = await pay.mutateAsync({ idempotencyKey: current.key, body: current.body });
-      clearBillPaymentAttempt(userId, bill.id);
-      // The confirmation uses the server's recorded amount and new outstanding, not the typed value.
-      toast(
-        result.replayed
-          ? `This payment to ${bill.vendor_name} had already been recorded; no duplicate was created. Remaining ${formatMoney(result.bill.outstanding)}.`
-          : `Paid ${formatMoney(result.payment.amount)} to ${bill.vendor_name}. Remaining ${formatMoney(result.bill.outstanding)}.`,
-      );
-      onClose();
-    } catch (err) {
-      // Only a processed rejection proves nothing was recorded; then the fields unlock for correction and the
-      // next submit creates a new attempt. Anything else keeps the attempt (same key, same body) for retry.
-      if (isDefinitiveRejection(err)) {
-        clearBillPaymentAttempt(userId, bill.id);
-        setAttempt(null);
-      }
-      setError(describeError(err));
+      await withBillPaymentLock(businessId, bill.id, async () => {
+        // Re-read inside the lock: another tab may have created, confirmed or released an attempt meanwhile.
+        const stored = loadBillPaymentAttempt(businessId, bill.id);
+        const shown = attemptRef.current;
+        let current: BillPaymentAttempt;
+        if (shown) {
+          if (stored?.key !== shown.key) {
+            syncFromStorage();
+            return;
+          }
+          // A retry skips the client-side checks on purpose: the body was validated when the attempt was
+          // created, and if the first request was recorded the bill's outstanding is now lower, which would
+          // wrongly block the retry that the backend would answer with a replay.
+          current = stored;
+        } else {
+          if (stored) {
+            adopt(stored);
+            setError("A payment for this bill is already awaiting confirmation. Retry it before making a new payment.");
+            return;
+          }
+          const done = loadBillPaymentDone(businessId, bill.id);
+          if (done && done.at > openedAt) {
+            setError("A payment for this bill was just recorded in another tab. Close this and check the updated balance before paying again.");
+            return;
+          }
+          if (!isValidAmount(amount)) return setError("Enter a positive amount with up to 2 decimals.");
+          // Overpayment guard using exact decimal comparison against the outstanding shown in the dialog.
+          if (compareMoney(amount, bill.outstanding) > 0) return setError(`Cannot exceed the remaining ${formatMoney(bill.outstanding)}.`);
+          const created = createBillPaymentAttempt({
+            key: newIdempotencyKey(),
+            businessId,
+            billId: bill.id,
+            userId,
+            body: { amount, payment_date: date, payment_method: method },
+          });
+          if (!created.created) {
+            adopt(created.attempt);
+            setError("A payment for this bill is already awaiting confirmation. Retry it before making a new payment.");
+            return;
+          }
+          current = created.attempt;
+          setAttempt(current);
+        }
+        try {
+          const result = await pay.mutateAsync({ idempotencyKey: current.key, body: current.body });
+          confirmBillPaymentAttempt(businessId, bill.id, current.key);
+          // The confirmation uses the server's recorded amount and new outstanding, not the typed value.
+          toast(
+            result.replayed
+              ? `This payment to ${bill.vendor_name} had already been recorded; no duplicate was created. Remaining ${formatMoney(result.bill.outstanding)}.`
+              : `Paid ${formatMoney(result.payment.amount)} to ${bill.vendor_name}. Remaining ${formatMoney(result.bill.outstanding)}.`,
+          );
+          onClose();
+        } catch (err) {
+          // Only a processed rejection proves nothing was recorded; then the fields unlock for correction and
+          // the next submit creates a new attempt. Anything else keeps the attempt (same key, same body).
+          if (isDefinitiveRejection(err)) {
+            rejectBillPaymentAttempt(businessId, bill.id, current.key);
+            setAttempt(null);
+          }
+          setError(describeError(err));
+        }
+      });
     } finally {
       inFlight.current = false;
+      setSubmitting(false);
     }
-  }
-
-  function discardAttempt() {
-    clearBillPaymentAttempt(userId, bill.id);
-    setAttempt(null);
-    setConfirmDiscard(false);
-    setError(null);
   }
 
   const locked = attempt !== null;
   return (
     <Dialog open onClose={onClose} title={`Pay ${bill.vendor_name}`} description={<>Remaining <Money value={bill.outstanding} className="font-semibold text-ink" /> · this records actual cash going out.</>}>
       <form onSubmit={onSubmit} noValidate className="space-y-4">
-        {locked && !pay.isPending && (
+        {locked && !submitting && (
           <Notice tone="warn" title="Payment not confirmed">
-            We couldn&apos;t confirm whether this payment of <Money value={String(attempt.body.amount)} /> was recorded. Retrying sends the same payment, so it can&apos;t be recorded twice.
+            We couldn&apos;t confirm whether this payment of <Money value={String(attempt.body.amount)} /> was recorded. It is saved on this device, so you can close this and retry later. Retrying sends exactly the same payment, so it can&apos;t be recorded twice.
           </Notice>
         )}
         <div className="grid gap-4 sm:grid-cols-3">
@@ -187,33 +282,42 @@ function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
           </Field>
         </div>
         <FormError message={error} />
-        {confirmDiscard && (
-          <Notice tone="danger" title="Discard this attempt?">
-            If the first request was recorded, a new payment would pay this bill twice. Discard only after checking the bill&apos;s payments.
-          </Notice>
-        )}
-        <div className="flex flex-wrap justify-end gap-2">
-          {locked && !pay.isPending && (
-            <Button type="button" variant="ghost" onClick={confirmDiscard ? discardAttempt : () => setConfirmDiscard(true)}>
-              {confirmDiscard ? "Discard anyway" : "Discard attempt"}
-            </Button>
-          )}
-          <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={pay.isPending}>{locked ? "Retry payment" : "Record bill payment"}</Button>
+        <div className="flex justify-end gap-2">
+          {/* Closing never deletes a pending attempt; it stays saved until the backend confirms an outcome. */}
+          <Button type="button" variant="ghost" onClick={onClose}>{locked ? "Close" : "Cancel"}</Button>
+          <Button type="submit" loading={submitting}>{locked ? "Retry payment" : "Record bill payment"}</Button>
         </div>
       </form>
     </Dialog>
   );
 }
 
+/** Bill ids with a pending payment attempt for this business; updates on changes from any tab. */
+function usePendingBillPayments(businessId: string): Set<string> {
+  const snapshot = useSyncExternalStore(
+    subscribeBillPaymentAttempts,
+    () => listPendingBillIds(businessId).join(","),
+    () => "",
+  );
+  return new Set(snapshot ? snapshot.split(",") : []);
+}
+
 /** Filterable bill list with "Add bill" and per-row "Pay" actions. */
 export function BillsPanel() {
+  const { session } = useSession();
+  const qc = useQueryClient();
   // "" means "All": the status param is omitted. The filter is part of the query key, so each filter
   // value is cached separately. Only the first 100 bills are shown (no pager).
   const [status, setStatus] = useState<"open" | "overdue" | "paid" | "">("open");
   const bills = useBills({ status: status || undefined, page_size: 100 });
   const [adding, setAdding] = useState(false);
   const [paying, setPaying] = useState<Bill | null>(null);
+  const pending = usePendingBillPayments(session?.business.id ?? "unknown");
+  // A pending payment whose bill is not in the current list (e.g. the lost payment cleared it, so it left
+  // the "Unpaid" filter) must still be reachable.
+  const pendingHidden = bills.data ? [...pending].filter((id) => !bills.data.items.some((b) => b.id === id)).length : 0;
+  // Another tab confirmed or released a payment: this tab's cached balances are stale.
+  useEffect(() => subscribeBillPaymentAttempts((remote) => { if (remote) invalidateFinancial(qc); }), [qc]);
   // The Pay button is hidden when outstanding is exactly "0.00" (the API's 2-dp string form). Overdue
   // flags and days overdue come from the backend; the client does not compute them.
   return (
@@ -237,6 +341,12 @@ export function BillsPanel() {
           </div>
         }
       />
+      {pendingHidden > 0 && status !== "" && (
+        <Notice tone="warn" title="Bill payment awaiting confirmation">
+          {pendingHidden === 1 ? "A bill payment" : `${pendingHidden} bill payments`} could not be confirmed and {pendingHidden === 1 ? "is" : "are"} not in this list.{" "}
+          <button type="button" className="font-semibold underline underline-offset-2" onClick={() => setStatus("")}>Show all bills</button>
+        </Notice>
+      )}
       {bills.isError && <ErrorState error={bills.error} onRetry={() => bills.refetch()} />}
       {bills.isPending && <LoadingBlock rows={2} />}
       {bills.data && bills.data.items.length === 0 && <EmptyState title="No bills here" />}
@@ -263,7 +373,14 @@ export function BillsPanel() {
                 <td className={tdNum}><Money value={b.amount} /></td>
                 <td className={tdNum}><Money value={b.outstanding} className="font-semibold" /></td>
                 <td className={td}><PaymentStatusBadge status={b.payment_status} overdue={b.is_overdue} daysOverdue={b.days_overdue} /></td>
-                <td className={td}>{b.outstanding !== "0.00" && <Button size="sm" variant="secondary" onClick={() => setPaying(b)}>Pay</Button>}</td>
+                {/* A pending attempt is always resumable, even when the bill now shows nothing outstanding. */}
+                <td className={td}>
+                  {pending.has(b.id) ? (
+                    <Button size="sm" variant="secondary" onClick={() => setPaying(b)}>Resolve payment</Button>
+                  ) : (
+                    b.outstanding !== "0.00" && <Button size="sm" variant="secondary" onClick={() => setPaying(b)}>Pay</Button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
