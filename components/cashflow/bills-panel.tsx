@@ -13,15 +13,22 @@
  * Money is handled as decimal strings throughout; comparisons use exact BigInt helpers, never floats.
  */
 import { Plus } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 
 import { useSession, useToast } from "@/components/providers";
 import { Dialog } from "@/components/ui/dialog";
 import { DataTable, Money, PAYMENT_METHOD_LABEL, PaymentStatusBadge, td, tdNum, th, thNum } from "@/components/ui/finance";
 import { Field, FormError, Input, Select } from "@/components/ui/form";
-import { Button, Card, CardHeader, EmptyState, ErrorState, LoadingBlock } from "@/components/ui/primitives";
-import { ApiError, describeError } from "@/lib/api/errors";
+import { Button, Card, CardHeader, EmptyState, ErrorState, LoadingBlock, Notice } from "@/components/ui/primitives";
+import { describeError } from "@/lib/api/errors";
 import { newIdempotencyKey, useBills, useCreateBill, usePayBill } from "@/lib/api/hooks";
+import {
+  clearBillPaymentAttempt,
+  isDefinitiveRejection,
+  loadBillPaymentAttempt,
+  saveBillPaymentAttempt,
+  type BillPaymentAttempt,
+} from "@/lib/api/payment-attempt";
 import type { Bill, PaymentMethod } from "@/lib/api/types";
 import { addDays, formatDate, todayIn } from "@/lib/format/dates";
 import { compareMoney, formatMoney, isValidAmount } from "@/lib/format/money";
@@ -84,50 +91,94 @@ function NewBillDialog({ open, onClose }: { open: boolean; onClose: () => void }
 
 /**
  * Dialog that records a payment against one bill (POST /bills/{id}/payments). Mounted only while a bill
- * is selected, so each opening starts with fresh state and a fresh idempotency key.
+ * is selected.
+ *
+ * Idempotency: the first submit freezes the Idempotency-Key and the exact request body into an attempt
+ * (lib/api/payment-attempt.ts), saved to sessionStorage before the request is sent. The attempt is released
+ * only when the backend confirms an outcome: success (recorded or replayed) or a definitive 4xx rejection.
+ * After a network error, timeout or 5xx the outcome is unknown, so the fields lock and "Retry payment"
+ * resends the same key and body; the backend then records the payment once or replays the original.
+ * Reopening the dialog (including after a reload) restores a pending attempt for this bill.
  */
 function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
   const { session } = useSession();
   const toast = useToast();
   const pay = usePayBill(bill.id);
-  // Pre-filled with the full remaining balance (a decimal string from the API).
-  const [amount, setAmount] = useState(bill.outstanding);
-  const [date, setDate] = useState(todayIn(session?.business.timezone));
-  const [method, setMethod] = useState<PaymentMethod>("bank_transfer");
-  // Idempotency-Key for this submission, created lazily on mount and reused when the same submission is
-  // retried, so the backend can de-duplicate a repeated request (see the catch block for when it rotates).
-  const [key, setKey] = useState(newIdempotencyKey);
+  const userId = session?.user.id ?? "anonymous";
+  // An attempt whose outcome is still unknown (restored from sessionStorage on mount, if any).
+  const [attempt, setAttempt] = useState<BillPaymentAttempt | null>(() => loadBillPaymentAttempt(userId, bill.id));
+  // Pre-filled with the pending attempt's values, otherwise the full remaining balance (a decimal string).
+  const [amount, setAmount] = useState(() => (attempt ? String(attempt.body.amount) : bill.outstanding));
+  const [date, setDate] = useState(() => attempt?.body.payment_date ?? todayIn(session?.business.timezone));
+  const [method, setMethod] = useState<PaymentMethod>(() => attempt?.body.payment_method ?? "bank_transfer");
   const [error, setError] = useState<string | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Synchronous guard against a second submit (double click, Enter) before `pay.isPending` re-renders.
+  const inFlight = useRef(false);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (inFlight.current) return;
     setError(null);
-    if (!isValidAmount(amount)) return setError("Enter a positive amount with up to 2 decimals.");
-    // Overpayment guard using exact decimal comparison against the outstanding shown in the dialog.
-    if (compareMoney(amount, bill.outstanding) > 0) return setError(`Cannot exceed the remaining ${formatMoney(bill.outstanding)}.`);
+    setConfirmDiscard(false);
+    let current = attempt;
+    if (!current) {
+      if (!isValidAmount(amount)) return setError("Enter a positive amount with up to 2 decimals.");
+      // Overpayment guard using exact decimal comparison against the outstanding shown in the dialog.
+      if (compareMoney(amount, bill.outstanding) > 0) return setError(`Cannot exceed the remaining ${formatMoney(bill.outstanding)}.`);
+      current = { key: newIdempotencyKey(), billId: bill.id, body: { amount, payment_date: date, payment_method: method }, startedAt: new Date().toISOString() };
+      saveBillPaymentAttempt(userId, current);
+      setAttempt(current);
+    }
+    // A retry skips the client-side checks on purpose: the body was validated when the attempt was created,
+    // and if the first request was recorded the bill's outstanding is now lower, which would wrongly block
+    // the retry that the backend would answer with a replay.
+    inFlight.current = true;
     try {
-      const result = await pay.mutateAsync({ idempotencyKey: key, body: { amount, payment_date: date, payment_method: method } });
+      const result = await pay.mutateAsync({ idempotencyKey: current.key, body: current.body });
+      clearBillPaymentAttempt(userId, bill.id);
       // The confirmation uses the server's recorded amount and new outstanding, not the typed value.
-      toast(`Paid ${formatMoney(result.payment.amount)} to ${bill.vendor_name}. Remaining ${formatMoney(result.bill.outstanding)}.`);
+      toast(
+        result.replayed
+          ? `This payment to ${bill.vendor_name} had already been recorded; no duplicate was created. Remaining ${formatMoney(result.bill.outstanding)}.`
+          : `Paid ${formatMoney(result.payment.amount)} to ${bill.vendor_name}. Remaining ${formatMoney(result.bill.outstanding)}.`,
+      );
       onClose();
     } catch (err) {
-      // A 4xx rejection (e.g. validation) means nothing was recorded, so the next attempt is treated as a
-      // new submission with a new key; 5xx keeps the key for a safe retry. Note: unwrap() reports network
-      // failures and timeouts as ApiError status 0, which also satisfies `< 500`, so those rotate the key
-      // too even though the server may have recorded the payment.
-      if (err instanceof ApiError && err.status < 500) setKey(newIdempotencyKey());
+      // Only a processed rejection proves nothing was recorded; then the fields unlock for correction and the
+      // next submit creates a new attempt. Anything else keeps the attempt (same key, same body) for retry.
+      if (isDefinitiveRejection(err)) {
+        clearBillPaymentAttempt(userId, bill.id);
+        setAttempt(null);
+      }
       setError(describeError(err));
+    } finally {
+      inFlight.current = false;
     }
   }
+
+  function discardAttempt() {
+    clearBillPaymentAttempt(userId, bill.id);
+    setAttempt(null);
+    setConfirmDiscard(false);
+    setError(null);
+  }
+
+  const locked = attempt !== null;
   return (
     <Dialog open onClose={onClose} title={`Pay ${bill.vendor_name}`} description={<>Remaining <Money value={bill.outstanding} className="font-semibold text-ink" /> · this records actual cash going out.</>}>
       <form onSubmit={onSubmit} noValidate className="space-y-4">
+        {locked && !pay.isPending && (
+          <Notice tone="warn" title="Payment not confirmed">
+            We couldn&apos;t confirm whether this payment of <Money value={String(attempt.body.amount)} /> was recorded. Retrying sends the same payment, so it can&apos;t be recorded twice.
+          </Notice>
+        )}
         <div className="grid gap-4 sm:grid-cols-3">
-          <Field label="Amount (₹)">{(id) => <Input id={id} inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />}</Field>
-          <Field label="Date">{(id) => <Input id={id} type="date" value={date} onChange={(e) => setDate(e.target.value)} />}</Field>
+          <Field label="Amount (₹)">{(id) => <Input id={id} inputMode="decimal" value={amount} disabled={locked} onChange={(e) => setAmount(e.target.value)} />}</Field>
+          <Field label="Date">{(id) => <Input id={id} type="date" value={date} disabled={locked} onChange={(e) => setDate(e.target.value)} />}</Field>
           <Field label="Method">
             {(id) => (
-              <Select id={id} value={method} onChange={(e) => setMethod(e.target.value as PaymentMethod)}>
+              <Select id={id} value={method} disabled={locked} onChange={(e) => setMethod(e.target.value as PaymentMethod)}>
                 {Object.entries(PAYMENT_METHOD_LABEL).map(([v, l]) => (
                   <option key={v} value={v}>{l}</option>
                 ))}
@@ -136,9 +187,19 @@ function PayBillDialog({ bill, onClose }: { bill: Bill; onClose: () => void }) {
           </Field>
         </div>
         <FormError message={error} />
-        <div className="flex justify-end gap-2">
+        {confirmDiscard && (
+          <Notice tone="danger" title="Discard this attempt?">
+            If the first request was recorded, a new payment would pay this bill twice. Discard only after checking the bill&apos;s payments.
+          </Notice>
+        )}
+        <div className="flex flex-wrap justify-end gap-2">
+          {locked && !pay.isPending && (
+            <Button type="button" variant="ghost" onClick={confirmDiscard ? discardAttempt : () => setConfirmDiscard(true)}>
+              {confirmDiscard ? "Discard anyway" : "Discard attempt"}
+            </Button>
+          )}
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button type="submit" loading={pay.isPending}>Record bill payment</Button>
+          <Button type="submit" loading={pay.isPending}>{locked ? "Retry payment" : "Record bill payment"}</Button>
         </div>
       </form>
     </Dialog>
