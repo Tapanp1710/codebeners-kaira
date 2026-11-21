@@ -1,4 +1,4 @@
-# KAIRA API Contract (v1.0.0)
+# KAIRA API Contract (v1.1.0)
 
 The backend owns this contract. The machine-readable source of truth is
 [`docs/openapi.json`](openapi.json) (regenerate with `python -m app.cli export-openapi`;
@@ -57,10 +57,54 @@ per endpoint in OpenAPI (`status`, `customer_id`, `search`, date ranges, `sort` 
 
 ## Idempotency
 
-`POST /invoices/{id}/payments` and `POST /bills/{id}/payments` accept an optional
-`Idempotency-Key` header. Retrying with the same key returns the original payment with
-`replayed: true` and never records a second payment. Generate one key per user submission
-(e.g. `crypto.randomUUID()`), reuse it on retry.
+`POST /invoices/{id}/payments` and `POST /bills/{id}/payments` accept an optional `Idempotency-Key` header. One key
+stands for **exactly one request**:
+
+- **The same key with an identical request** returns the original payment with `replayed: true`, even when that
+  payment already cleared the balance, and never records a second payment.
+- **The same key with any difference** in amount, payment date, method, reference or notes (or a different
+  invoice or bill) returns **422 `IDEMPOTENCY_KEY_REUSED`** and records nothing. *(v1.1.0: earlier versions compared
+  only the target and the amount.)*
+- **How requests are compared:**
+  - `"400"` equals `"400.00"`.
+  - `null`, `""` and whitespace-only reference or notes are the same; any other text is compared exactly.
+  - An omitted `payment_date` is not the same as an explicit one, but an omitted date still matches an omitted date
+    on a later day.
+
+Generate one key per user submission and resend the **identical** body on retry. For recovery across devices and
+browsers, use payment attempts (below), which keep the key and body on the server.
+
+## Payment attempts (v1.1.0): cross-device payment recovery
+
+See PAYMENT_ATTEMPTS.md for the full state machine. Client flow:
+
+1. `POST /payment-attempts` with `{resource_type: "invoice"|"bill", resource_id, amount, payment_date?,
+   payment_method, reference?, notes? (invoices only), idempotency_key? (optional, at least 8 characters)}`.
+   - **201**: a new `pending` attempt.
+   - **200**: the existing attempt. This happens for the same request with no key (a lost registration response, or
+     another device), or for the same key with the same request.
+   - **409 `PAYMENT_ATTEMPT_PENDING`** (`details.attempt_id`): another request is already pending for that invoice or
+     bill. Resolve that one instead.
+   - **422 `IDEMPOTENCY_KEY_REUSED`**: the key is already bound to a different request.
+   - A client key that is already on a **recorded** payment with the same request gives a `succeeded` attempt linked
+     to that payment. Use this to migrate attempts that a browser saved locally.
+2. `POST /payment-attempts/{id}/execute`
+   - **200**: `status: "succeeded"`, with `result.invoice_payment` or `result.bill_payment` (the same shapes as the
+     direct payment endpoints) and `result.replayed`.
+   - **422**: refused, nothing recorded; the attempt is now `rejected` (`failure_code`).
+   - **409 `PAYMENT_ATTEMPT_CANCELLED`**: the attempt was cancelled.
+   - **A network error or 5xx** means the outcome is unknown. Execute again or GET the attempt; both are always safe.
+3. `GET /payment-attempts?status=pending` (with `resource_type`, `resource_id`, `page` and `page_size` ≤ 200
+   available): any authorised device can find unresolved payments. Each item has `resource_label` (the invoice number
+   or vendor) and the frozen `request`.
+4. `GET /payment-attempts/{id}` returns the attempt, plus `result` once it has `succeeded`.
+5. `POST /payment-attempts/{id}/cancel`
+   - **200**: cancelled. Only possible while `pending` and when no payment exists under the key.
+   - **409 `PAYMENT_ATTEMPT_NOT_PENDING`**: already succeeded or rejected.
+   - **409 `PAYMENT_ALREADY_RECORDED`**: a payment exists under the key, so the attempt becomes `succeeded`.
+
+The idempotency key is never returned. Clients act on the attempt `id`. Writes need the `X-CSRF-Token` header and
+are rate limited per user (`RATE_LIMIT_PAYMENT_PER_MINUTE`).
 
 ## Endpoints
 
@@ -76,6 +120,7 @@ per endpoint in OpenAPI (`status`, `customer_id`, `search`, date ranges, `sort` 
 | `GET /payments` | All payments (filters) |
 | `GET /receivables`, `GET /receivables/summary` | Open invoices with ageing (`current`,`1_30`,`31_60`,`61_90`,`90_plus`) and commitments; totals |
 | `GET/POST /bills`, `GET/PATCH /bills/{id}`, `POST /bills/{id}/payments` | Payables |
+| `GET/POST /payment-attempts`, `GET /payment-attempts/{id}`, `POST /payment-attempts/{id}/execute`, `POST /payment-attempts/{id}/cancel` | Server-side payment attempts for cross-device recovery (see above) |
 | `GET/POST /payment-commitments`, `PATCH /payment-commitments/{id}` | Promised payments (statuses `pending`,`fulfilled`,`cancelled`,`broken`) |
 | `GET /cashflow/position` | Actual current cash |
 | `GET /cashflow/forecast?horizon_days=90&granularity=daily\|weekly` | Projection (`value_type: "projected"`) |
@@ -115,7 +160,7 @@ per endpoint in OpenAPI (`status`, `customer_id`, `search`, date ranges, `sort` 
 | 403 | `FORBIDDEN`, `CSRF_FAILED` |
 | 404 | `NOT_FOUND` (also for records of another business) |
 | 405 | `METHOD_NOT_ALLOWED` |
-| 409 | `CONFLICT`, `ACTION_NOT_PENDING` |
+| 409 | `CONFLICT`, `ACTION_NOT_PENDING`, `PAYMENT_ATTEMPT_PENDING`, `PAYMENT_ATTEMPT_CANCELLED`, `PAYMENT_ATTEMPT_NOT_PENDING`, `PAYMENT_ALREADY_RECORDED` |
 | 413 | `PAYLOAD_TOO_LARGE` |
 | 422 | `VALIDATION_ERROR`, `OVERPAYMENT`, `INVOICE_ALREADY_PAID`, `BILL_ALREADY_PAID`, `INVOICE_VOID`, `INVOICE_HAS_PAYMENTS`, `INVOICE_CUSTOMER_MISMATCH`, `IDEMPOTENCY_KEY_REUSED`, `AMOUNT_BELOW_PAID`, `COMMITMENT_EXCEEDS_OUTSTANDING`, `INVALID_AMOUNT`, `INVALID_STATUS`, `INVALID_HORIZON`, `INVALID_DELAY`, `TARGET_REQUIRED`, `NO_RECEIVABLES`, `NOTHING_TO_DELAY`, `NOTHING_OUTSTANDING`, `NOTHING_REMAINING`, `ACTION_NOT_EXECUTABLE` |
 | 429 | `RATE_LIMITED` (`Retry-After` header) |

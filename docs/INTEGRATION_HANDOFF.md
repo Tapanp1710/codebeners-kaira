@@ -21,8 +21,17 @@ backend_commit=<git rev-parse HEAD of kaira-backend when copied>
 openapi_sha256_prefix=<sha256sum docs/openapi.json | cut -c1-16>
 ```
 
-Current contract: **version 1.0.0, 39 paths, 109 schemas.** The commit and hash are recorded in
-`docs/INTEGRATION_STATUS.md` with each contract change.
+Current contract: **version 1.1.0, 43 paths, 117 schemas** (branch `feat/payment-integrity`; record the
+`backend_commit` from `git rev-parse HEAD` when you copy the file). Changes since 1.0.0:
+- **New:** `/payment-attempts` (register, list, get, execute, cancel) for cross-device payment recovery.
+- **Stricter:** an `Idempotency-Key` reused with *any* different payment detail is 422 `IDEMPOTENCY_KEY_REUSED`.
+  Before, only the amount and target were compared.
+- **New 409 codes:** `PAYMENT_ATTEMPT_PENDING`, `PAYMENT_ATTEMPT_CANCELLED`, `PAYMENT_ATTEMPT_NOT_PENDING`,
+  `PAYMENT_ALREADY_RECORDED`.
+- **Rate limiting:** limits are shared across workers, and there is a new per-user limit on payment-attempt writes
+  and approval. Expect `429` with `Retry-After`.
+
+See API_CONTRACT.md ("Idempotency", "Payment attempts") and PAYMENT_ATTEMPTS.md.
 
 ## Generating types (frontend)
 
