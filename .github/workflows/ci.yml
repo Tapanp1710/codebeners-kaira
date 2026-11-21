@@ -1,0 +1,62 @@
+name: frontend-ci
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Environment template is valid
+        run: cp .env.example .env.local && node scripts/check-env.mjs
+      - name: Contract and generated types are consistent
+        run: node scripts/contract.mjs check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Dependency audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t kaira-frontend:ci .
+
+  # End-to-end tests need a running KAIRA backend; they run when a staging backend is configured.
+  e2e:
+    runs-on: ubuntu-latest
+    needs: checks
+    if: ${{ vars.E2E_BACKEND_ORIGIN != '' }}
+    env:
+      BACKEND_ORIGIN: ${{ vars.E2E_BACKEND_ORIGIN }}
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
