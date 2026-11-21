@@ -14,7 +14,7 @@
 | Cookie + CSRF proxy | verified with curl and in Chromium | two Set-Cookie headers, refresh path rewrite, CSRF rejection, refresh via proxy |
 | Scripts (PowerShell) | setup, start, stop, verify run successfully, including failure paths | Windows 11 |
 | Scripts (bash) | syntax-checked only | not executed on Linux/macOS |
-| Docker image | see final report | `docker build` |
+| Docker image | verified 2026-11-21: builds, runs as non-root `kaira`, serves `/login`, proxied login 200 against local backend | `docker build`, `docker run -e BACKEND_ORIGIN=http://host.docker.internal:8000` |
 
 ## Not verified / blockers
 
