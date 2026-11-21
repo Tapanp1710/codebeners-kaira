@@ -1,6 +1,6 @@
 # Environment audit (Milestone 0)
 
-- Project root: C:/Users/Tarun Pendyala/Desktop/Codebenders/backend — its own git repository, created by `git init` in this milestone. The parent folder C:/Users/Tarun Pendyala is a separate repository and is not used.
+- Project root: C:/Users/Tarun Pendyala/Desktop/Codebenders/backend - its own git repository, created by `git init` in this milestone. The parent folder C:/Users/Tarun Pendyala is a separate repository and is not used.
 - Branch: feat/kaira-backend
 - Python 3.11.0
 - git 2.46.0
