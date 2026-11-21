@@ -1,0 +1,49 @@
+# Manual, approval-gated deployment. Nothing deploys automatically.
+#
+# Required (GitHub > Settings > Environments > "production"; add required reviewers there):
+#   secrets.DEPLOY_HOOK_URL      deploy hook of the hosting provider (e.g. Render/Railway deploy hook)
+#   vars.PRODUCTION_API_URL      public base URL, e.g. https://api.example.com
+# The hosting service must run `python -m app.cli migrate` as its pre-deploy/release command
+# (see docs/DEPLOYMENT.md). Back up the production database before deploying schema changes.
+name: backend-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type "deploy" to deploy the selected ref to production
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: checks
+    if: ${{ inputs.confirm == 'deploy' }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Verify deployment configuration
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+          API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          [ -n "$DEPLOY_HOOK_URL" ] || { echo "::error::secrets.DEPLOY_HOOK_URL is not configured"; exit 1; }
+          [ -n "$API_URL" ] || { echo "::error::vars.PRODUCTION_API_URL is not configured"; exit 1; }
+      - name: Trigger deployment
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+        run: curl -fsS -X POST "$DEPLOY_HOOK_URL" > /dev/null
+      - name: Wait for readiness
+        env:
+          API_URL: ${{ vars.PRODUCTION_API_URL }}
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "$API_URL/ready"; then echo; echo "Production API is ready"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::API did not become ready"; exit 1
