@@ -50,6 +50,25 @@ contracts/                   imported backend contract + version record
   ledger-derived view (dashboard, insights, customers, invoices, receivables, forecast, bills, commitments, audit).
   Customer edits only refresh customer data.
 * Payments send an `Idempotency-Key` created once per submission and reused on retry.
+* **Bill payment recovery** (`lib/api/payment-attempt.ts`, `components/cashflow/bills-panel.tsx`):
+  * The first submit saves an *attempt* (the key plus the exact request body) to `localStorage`, before the request is
+    sent. The storage key is `kaira:bill-payment-attempt:v1:<businessId>:<billId>`.
+  * The attempt is removed only when the backend confirms an outcome:
+    * success, whether newly recorded or replayed;
+    * a processed 4xx rejection, which means nothing was recorded.
+  * Network errors, timeouts, 5xx and 401/408/409/429 keep the attempt. The form locks and "Retry payment" resends the
+    same key and body.
+  * There is no discard action. Closing the dialog keeps the attempt, and the bill row then shows "Resolve payment".
+  * Attempts survive reloads, closed tabs and browser restarts, and are never overwritten.
+  * **Cross-tab:** submits for a bill run under a per-bill Web Lock and re-read storage inside the lock. Changes are
+    broadcast on a `BroadcastChannel`, with `storage` events as a fallback, so other tabs adopt a pending attempt or
+    close once it is confirmed. A 24 h completion marker lets them tell "confirmed" apart from "rejected".
+  * **Trade-offs:** the entry holds no tokens or credentials, only the key, ids, amount, date and method. It is
+    scoped to the business, so users of the same business share a bill's pending attempt; that sharing is what stops a
+    second person or tab from paying the bill again. It outlives logout on a shared device until the payment is
+    resolved. Attempts do not expire, because backend idempotency keys never expire and an old key can always be
+    replayed safely. If `localStorage` is blocked, attempts are kept in memory only, with no reload or cross-tab
+    recovery.
 * Money stays a decimal string. Display uses exact BigInt formatting with Indian digit grouping. The invoice form's
   running estimate uses exact arithmetic and is labelled as an estimate. Charts convert to numbers only for plotting,
   and their labels show the exact strings.
