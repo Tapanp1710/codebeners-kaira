@@ -286,3 +286,12 @@ def test_failed_tool_is_never_reported_as_done(setup, db, app, settings):
     db.expire_all()
     statuses = {e.status for e in db.scalars(select(AgentToolExecution))}
     assert "completed" not in statuses
+
+
+def test_find_customers_matches_names_spoken_in_telugu_and_hindi(setup):
+    for query in ("రమేష్", "रमेश", "ramesh", "Rmesh Kumar"):
+        r = setup.call("find_customers", {"query": query}, f"find {query}")
+        assert [c["name"] for c in r["customers"]] == ["Ramesh Kumar"], (query, r)
+        assert r["customers"][0]["outstanding"] == "12000.00"
+    r = setup.call("find_customers", {"query": "సురేష్"}, "find Suresh")
+    assert r["customers"] == []
