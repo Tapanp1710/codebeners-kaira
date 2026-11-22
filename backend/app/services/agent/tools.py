@@ -902,8 +902,9 @@ def record_customer_payment(ctx: ToolContext, a: dict[str, Any]) -> dict[str, An
 
 @tool(
     "record_payment_promise",
-    "Record a customer's promise to pay (a commitment) by a date: a stated amount or "
-    "'the remaining balance'. Does not record any payment.",
+    "ONLY a promise to pay later (a commitment) by a date: a stated amount or 'the remaining balance'. "
+    "It records NO payment. If the user also says money was paid now (e.g. 'paid 5,000 today, the rest next "
+    "Monday'), do not use this tool: use record_payment_and_promise.",
     {
         **CUSTOMER_REF,
         "amount": {"type": "number"},
