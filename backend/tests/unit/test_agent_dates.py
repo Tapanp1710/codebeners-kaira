@@ -161,7 +161,9 @@ def test_cheat_sheet_lists_resolved_dates():
 
 
 def test_reply_dates_are_found_in_three_languages():
-    found = {(y, m, d) for y, m, d, _ in D.reply_dates("Paid on 2026-11-22; due 25th November 2026 or 5 Dec.")}
+    found = {
+        (y, m, d) for y, m, d, _ in D.reply_dates("Paid on 2026-11-22; due 25th November 2026 or 5 Dec.")
+    }
     assert found == {(2026, 11, 22), (2026, 11, 25), (None, 12, 5)}
     assert [(m, d) for _y, m, d, _ in D.reply_dates("बाकी 23 नवंबर को")] == [(11, 23)]
     assert [(m, d) for _y, m, d, _ in D.reply_dates("మిగిలినది 23 నవంబర్‌న")] == [(11, 23)]

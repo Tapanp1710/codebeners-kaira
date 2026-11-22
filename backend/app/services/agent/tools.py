@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,11 +32,13 @@ from app.core.exceptions import AppError, BusinessRuleError, NotFoundError, Perm
 from app.models import (
     AgentToolExecution,
     AuditLog,
+    Bill,
     CashTransaction,
     Conversation,
     Customer,
     Invoice,
     Payment,
+    PaymentCommitment,
     ProposedAction,
 )
 from app.schemas.ai import Operation
@@ -50,15 +53,23 @@ from app.services import (
     payment_service,
     receivables_service,
 )
+from app.services.agent import dates as dateres
 from app.services.agent.numbers import spoken_amount
 from app.services.ai import action_service
 from app.services.ai.resolution import Analysis, analyse, resolve_customer
-from app.services.ai.text_parse import normalise_text
+from app.services.ai.text_parse import normalise_invoice_number, normalise_text
 from app.utils.money import ZERO, money_str, q2
 
 CORRECTION_PREFIX = "agent-correction:"
 # Soft warnings that still allow autonomous execution of an owner's clear instruction.
 AUTO_OK_WARNINGS = {"DATE_DEFAULTED"}
+# A payment of the same amount on the same invoice this recently is read back before it is recorded again.
+RECENT_DUPLICATE_MINUTES = 15
+REMAINING_WORDS = re.compile(
+    r"\b(?:the rest|rest of (?:it|the \w+)|remaining|remainder|balance|baki|baaki)\b"
+    r"|बाकी|बाक़ी|बचा|बचे|बची|शेष|మిగిలిన|మిగతా|మిగిలింది|మిగిలినది|మిగులు|బాకీ|బ్యాలెన్స్",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -177,6 +188,302 @@ def _amount(v: Any) -> Decimal | None:
     if d <= ZERO:
         raise BusinessRuleError("INVALID_AMOUNT", "Amount must be greater than zero.")
     return d
+
+
+# --------------------------------------------------------------------------- dates
+@dataclass
+class DateDecision:
+    """What the server decided for one date field from the user's own words.
+
+    action: ok (use `value`), defaulted (no date said: the service uses business today), confirm (use `value` but
+    read it back first, e.g. the model's date differs from what the words mean), clarify (ask; record nothing)."""
+
+    field: str
+    label: str
+    action: str
+    value: dt.date | None = None
+    evidence: str | None = None
+    message: str | None = None
+    said: dt.date | None = None
+    proposed: dt.date | None = None
+    candidates: tuple[dt.date, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"field": self.field, "decision": self.action}
+        if self.value:
+            out["date"] = self.value.isoformat()
+        if self.evidence:
+            out["words"] = self.evidence
+        if self.said:
+            out["date_from_words"] = self.said.isoformat()
+        if self.proposed:
+            out["date_proposed"] = self.proposed.isoformat()
+        if self.candidates:
+            out["could_mean"] = [d.isoformat() for d in self.candidates]
+        if self.message:
+            out["message"] = self.message
+        return out
+
+
+def _latest_utterance(ctx: ToolContext) -> str:
+    lines = [ln for ln in (ctx.transcript or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def decide_date(
+    ctx: ToolContext,
+    a: dict[str, Any],
+    field_name: str,
+    *,
+    label: str,
+    evidence_keys: tuple[str, ...],
+    prefer: str,
+    required: bool = False,
+    default_today: bool = False,
+    not_after_today: bool = False,
+    not_before_today: bool = False,
+    exclude: tuple[str, ...] = (),
+) -> DateDecision:
+    """Resolve a date field deterministically. The model's value is only a proposal: the user's words (its
+    evidence phrase, else the date phrases in what they said) decide, and a disagreement is read back."""
+    today = ctx.today
+    raw = a.get(field_name)
+    proposed: dt.date | None = None
+    words: list[str] = []
+    ev = a.get("evidence") or {}
+    for k in evidence_keys:
+        if isinstance(ev, dict) and ev.get(k):
+            words.append(str(ev[k]))
+    if raw not in (None, ""):
+        try:
+            proposed = dt.date.fromisoformat(str(raw).strip()[:10])
+        except ValueError:
+            words.append(
+                str(raw)
+            )  # the model passed words ("next Monday"): treat them as a phrase to resolve
+    transcript = ctx.transcript or ""
+    said_text = normalise_text(transcript)
+
+    def finish(d: DateDecision) -> DateDecision:
+        v = d.value
+        if v is not None and d.action in ("ok", "confirm"):
+            if not_after_today and v > today:
+                return DateDecision(
+                    field_name,
+                    label,
+                    "clarify",
+                    message=f"The {label} would be {dateres.describe(v)}, which is in the future. Did the money "
+                    "already come in? If it is still to come, that is a promise, not a payment.",
+                    said=d.said,
+                    proposed=d.proposed,
+                )
+            if not_before_today and v < today:
+                return DateDecision(
+                    field_name,
+                    label,
+                    "clarify",
+                    message=f"The {label} would be {dateres.describe(v)}, which has already passed. Which date "
+                    "did you mean?",
+                    said=d.said,
+                    proposed=d.proposed,
+                )
+        return d
+
+    # 1. The evidence phrase for this field, read in the sentence it was spoken in.
+    found: list[tuple[str, list[dateres.DateMention]]] = []
+    for frag in words:
+        if normalise_text(frag) not in said_text:
+            continue
+        mentions = dateres.mentions_in_fragment(frag, transcript, today, prefer=prefer)
+        if mentions:
+            found.append((frag, mentions))
+    if proposed is not None:  # any evidence phrase that means exactly the proposed date settles it
+        for _frag, mentions in found:
+            hit = next((x for x in mentions if x.date == proposed), None)
+            if hit is not None:
+                return finish(
+                    DateDecision(field_name, label, "ok", value=proposed, evidence=hit.phrase, said=proposed)
+                )
+    for frag, mentions in found[:1]:
+        resolved = [x for x in mentions if not x.ambiguous]
+        ambiguous = [x for x in mentions if x.ambiguous]
+        hit = next((x for x in resolved if proposed and x.date == proposed), None)
+        if hit is None and ambiguous and not resolved:
+            amb = ambiguous[0]
+            return DateDecision(
+                field_name,
+                label,
+                "clarify",
+                message=f"{amb.reason}. Which one is the {label}?",
+                proposed=proposed,
+                candidates=amb.candidates,
+            )
+        if hit is None and len({x.date for x in resolved}) == 1:
+            hit = resolved[0]
+        if hit is None:
+            return DateDecision(
+                field_name,
+                label,
+                "clarify",
+                message=f"'{frag}' mentions more than one date. Which one is the {label}?",
+                proposed=proposed,
+                candidates=tuple(sorted({x.date for x in resolved})),
+            )
+        if proposed is not None and proposed != hit.date:
+            return finish(
+                DateDecision(
+                    field_name,
+                    label,
+                    "confirm",
+                    value=hit.date,
+                    evidence=hit.phrase,
+                    said=hit.date,
+                    proposed=proposed,
+                    message=f"You said '{hit.phrase}', which is {dateres.describe(hit.date)}, but "
+                    f"{dateres.describe(proposed)} was proposed. The {label} will be "
+                    f"{dateres.describe(hit.date)} unless you correct it.",
+                )
+            )
+        return finish(
+            DateDecision(field_name, label, "ok", value=hit.date, evidence=hit.phrase, said=hit.date)
+        )
+
+    # 2. No usable evidence phrase: look at the date words the user actually said.
+    latest = _latest_utterance(ctx)
+    excl = [normalise_text(e) for e in exclude if e]
+
+    def own(x: dateres.DateMention) -> bool:  # not a phrase another field of this call already used
+        p = normalise_text(x.phrase)
+        return not any(p in e or e in p for e in excl)
+
+    latest_mentions = [x for x in dateres.find_dates(latest, today, prefer=prefer) if own(x)]
+    latest_resolved = [x for x in latest_mentions if not x.ambiguous]
+    if proposed is not None:
+        pool = latest_resolved + [
+            x for x in dateres.find_dates(transcript, today, prefer=prefer) if not x.ambiguous and own(x)
+        ]
+        hit = next((x for x in pool if x.date == proposed), None)
+        if hit is not None:
+            return finish(
+                DateDecision(field_name, label, "ok", value=proposed, evidence=hit.phrase, said=proposed)
+            )
+        if (
+            default_today
+            and proposed == today
+            and not any(x.ambiguous or x.date < today for x in latest_mentions)
+        ):
+            return DateDecision(field_name, label, "defaulted", proposed=proposed)
+        if not latest_mentions and default_today:
+            if proposed == today:
+                return DateDecision(field_name, label, "defaulted", proposed=proposed)
+            return DateDecision(
+                field_name,
+                label,
+                "confirm",
+                proposed=proposed,
+                message=f"No date was said, so the {label} will be today, {dateres.describe(today)} "
+                f"(not {dateres.describe(proposed)}).",
+            )
+        if not latest_mentions and not required:
+            return DateDecision(
+                field_name,
+                label,
+                "confirm",
+                proposed=proposed,
+                message=f"The {label} {dateres.describe(proposed)} was not said, so it is left out.",
+            )
+        fits = sorted(
+            {
+                x.date
+                for x in latest_resolved
+                if not (not_before_today and x.date < today) and not (not_after_today and x.date > today)
+            }
+        )
+        if len(fits) > 1 and prefer == dateres.FUTURE and today in fits:
+            fits.remove(today)  # "paid today, the rest next Monday": today is the payment, not this date
+        if len(fits) == 1 and not [x for x in latest_mentions if x.ambiguous]:
+            d = next(x for x in latest_resolved if x.date == fits[0])
+            return finish(
+                DateDecision(
+                    field_name,
+                    label,
+                    "confirm",
+                    value=d.date,
+                    evidence=d.phrase,
+                    said=d.date,
+                    proposed=proposed,
+                    message=f"You said '{d.phrase}', which is {dateres.describe(d.date)}, but "
+                    f"{dateres.describe(proposed)} was proposed. The {label} will be "
+                    f"{dateres.describe(d.date)} unless you correct it.",
+                )
+            )
+        return DateDecision(
+            field_name,
+            label,
+            "clarify",
+            proposed=proposed,
+            message=f"I could not match {dateres.describe(proposed)} to what was said. What is the {label}?",
+        )
+    if default_today:
+        ambiguous = [x for x in latest_mentions if x.ambiguous]
+        fitting = [x for x in latest_resolved if x.date <= today]
+        dates_said = {x.date for x in fitting}
+        if not fitting and not ambiguous:
+            return DateDecision(field_name, label, "defaulted")
+        if dates_said == {today} and not ambiguous:
+            return DateDecision(field_name, label, "ok", value=today, evidence=fitting[0].phrase, said=today)
+        if len(dates_said) == 1 and not ambiguous:
+            d = fitting[0]
+            return finish(
+                DateDecision(
+                    field_name,
+                    label,
+                    "confirm",
+                    value=d.date,
+                    evidence=d.phrase,
+                    said=d.date,
+                    message=f"You said '{d.phrase}', so the {label} will be {dateres.describe(d.date)}.",
+                )
+            )
+        if ambiguous and not fitting:
+            amb = ambiguous[0]
+            return DateDecision(
+                field_name,
+                label,
+                "clarify",
+                message=f"{amb.reason}. Which one is the {label}?",
+                candidates=amb.candidates,
+            )
+        return DateDecision(
+            field_name,
+            label,
+            "clarify",
+            message=f"Several dates were mentioned. What is the {label}?",
+            candidates=tuple(sorted(dates_said)),
+        )
+    if required:
+        return DateDecision(field_name, label, "clarify", message=f"What is the {label}?")
+    return DateDecision(field_name, label, "ok")
+
+
+def _date_clarification(decisions: list[DateDecision]) -> dict[str, Any] | None:
+    asks = [d for d in decisions if d.action == "clarify"]
+    if not asks:
+        return None
+    return {
+        "status": "needs_clarification",
+        "missing": [d.field for d in asks],
+        "dates": [d.as_dict() for d in decisions],
+        "message": " ".join(d.message or f"What is the {d.label}?" for d in asks) + " Nothing was recorded.",
+    }
+
+
+def _apply_date(op: Operation, attr: str, decision: DateDecision) -> None:
+    setattr(op, attr, decision.value)
+    if decision.value is not None and decision.evidence:
+        op.evidence[attr] = decision.evidence
+    elif decision.value is None:
+        op.evidence.pop(attr, None)
 
 
 def _outstanding_map(ctx: ToolContext) -> dict[uuid.UUID, Decimal]:
@@ -346,14 +653,17 @@ def list_invoices(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         customer_id=cid,
         status=None if status == "open" else status,
         sort="due_date",
-        page_size=int(a.get("limit") or 15),
+        page_size=100 if status == "open" else int(a.get("limit") or 15),
     )
     if status == "open":
         rows = [r for r in rows if r.outstanding > ZERO]
+        total = len(rows)
+    out_sum = m(sum((r.outstanding for r in rows), ZERO))
+    rows = rows[: int(a.get("limit") or 15)]
     return {
         "total": total,
         "invoices": [invoice_row(r) for r in rows],
-        "outstanding_sum": m(sum((r.outstanding for r in rows), ZERO)),
+        "outstanding_sum": out_sum,
     }
 
 
@@ -692,8 +1002,14 @@ def navigate(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         "approvals": "/actions",
         "agent": "/agent",
     }.get(a["screen"])
-    if a["screen"] == "customer" and _uuid(a.get("customer_id")):
-        path = f"/customers/{a['customer_id']}"
+    if a["screen"] == "customer":
+        cid = _uuid(a.get("customer_id"))
+        owned = cid and ctx.db.scalar(
+            select(Customer.id).where(Customer.id == cid, Customer.business_id == ctx.actor.business_id)
+        )
+        if not owned:  # never navigate to an id that is not this business's customer
+            return {"status": "needs_clarification", "message": "Which customer?"}
+        path = f"/customers/{cid}"
     if not path:
         return {"status": "needs_clarification", "message": "Which customer?"}
     ctx.events.append({"type": "navigate", "path": path})
@@ -724,7 +1040,14 @@ def _proposal_summary(action: ProposedAction) -> str:
             else (" (remaining balance)" if op.get("amount_is_remaining") else "")
         )
         who = op.get("customer_name") or op.get("vendor_name") or ""
-        parts.append(f"{op['type'].replace('_', ' ')}{amt}" + (f" for {who}" if who else ""))
+        when = ""
+        if op["type"] == "create_payment_commitment" and op.get("expected_payment_date"):
+            when = f" by {op['expected_payment_date']}"
+        elif op["type"] in ("record_payment", "create_expense", "record_sale"):
+            when = f" dated {op['date']}" if op.get("date") else " dated today"
+        if op.get("due_date"):
+            when += f" due {op['due_date']}"
+        parts.append(f"{op['type'].replace('_', ' ')}{amt}" + (f" for {who}" if who else "") + when)
     return "; ".join(parts)
 
 
@@ -769,6 +1092,87 @@ def _execute_action(ctx: ToolContext, action: ProposedAction) -> dict[str, Any]:
             out["invoice"] = invoice_row(inv)
     if balances:
         out["invoice_outstanding_after"] = balances
+    out["stored"] = stored_records(ctx, results)
+    out["summary"] = "; ".join(s["summary"] for s in out["stored"]) or _proposal_summary(action)
+    return out
+
+
+def stored_records(ctx: ToolContext, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What is actually in the database after execution, with its ISO dates (read back from the rows, so the
+    reply can only repeat the stored dates)."""
+    out: list[dict[str, Any]] = []
+    bid = ctx.actor.business_id
+    for r in results:
+        eid = _uuid(r.get("entity_id"))
+        et = r.get("entity_type")
+        if eid is None:
+            continue
+        if et == "payment":
+            p = ctx.db.scalar(select(Payment).where(Payment.id == eid, Payment.business_id == bid))
+            if p is not None:
+                inv = ctx.db.get(Invoice, p.invoice_id)
+                out.append(
+                    {
+                        "type": "payment",
+                        "payment_id": str(p.id),
+                        "amount": m(p.amount),
+                        "payment_date": p.payment_date.isoformat(),
+                        "invoice": inv.invoice_number if inv else None,
+                        "summary": f"Recorded payment of {m(p.amount)} on "
+                        f"{inv.invoice_number if inv else 'the invoice'} dated {p.payment_date.isoformat()}",
+                    }
+                )
+        elif et == "payment_commitment":
+            k = ctx.db.scalar(
+                select(PaymentCommitment).where(
+                    PaymentCommitment.id == eid, PaymentCommitment.business_id == bid
+                )
+            )
+            if k is not None:
+                out.append(
+                    {
+                        "type": "promise",
+                        "commitment_id": str(k.id),
+                        "amount": m(k.amount),
+                        "expected_payment_date": k.expected_payment_date.isoformat(),
+                        "summary": f"Promise of {m(k.amount)} expected on {k.expected_payment_date.isoformat()}",
+                    }
+                )
+        elif et == "invoice":
+            inv = ctx.db.scalar(select(Invoice).where(Invoice.id == eid, Invoice.business_id == bid))
+            if inv is not None:
+                out.append(
+                    {
+                        "type": "invoice",
+                        "invoice_number": inv.invoice_number,
+                        "invoice_date": inv.invoice_date.isoformat(),
+                        "due_date": inv.due_date.isoformat() if inv.due_date else None,
+                        "summary": f"Created invoice {inv.invoice_number} dated {inv.invoice_date.isoformat()}"
+                        + (f", due {inv.due_date.isoformat()}" if inv.due_date else ""),
+                    }
+                )
+        elif et == "bill":
+            b = ctx.db.scalar(select(Bill).where(Bill.id == eid, Bill.business_id == bid))
+            if b is not None:
+                out.append(
+                    {
+                        "type": "bill",
+                        "bill_id": str(b.id),
+                        "amount": m(b.amount),
+                        "bill_date": b.bill_date.isoformat(),
+                        "due_date": b.due_date.isoformat() if b.due_date else None,
+                        "paid": bool(r.get("bill_payment_id")),
+                        "summary": str(r.get("summary") or "Added bill")
+                        + f" dated {b.bill_date.isoformat()}"
+                        + (
+                            f", due {b.due_date.isoformat()}"
+                            if b.due_date and b.due_date != b.bill_date
+                            else ""
+                        ),
+                    }
+                )
+        elif r.get("summary"):
+            out.append({"type": et, "summary": str(r["summary"])})
     return out
 
 
@@ -806,12 +1210,96 @@ def value_checks(ctx: ToolContext, ops: list[Operation]) -> list[str]:
     return reasons
 
 
+def _payments_done_this_turn(ctx: ToolContext) -> dict[tuple[str, Decimal], dict[str, Any]]:
+    """(invoice id, amount) of every payment an executed action of THIS turn recorded -> that execution's result."""
+    rows = ctx.db.execute(
+        select(AgentToolExecution.proposed_action_id, AgentToolExecution.result).where(
+            AgentToolExecution.business_id == ctx.actor.business_id,
+            AgentToolExecution.user_id == ctx.actor.user_id,
+            AgentToolExecution.turn_id == ctx.turn_id,
+            AgentToolExecution.status == "completed",
+            AgentToolExecution.proposed_action_id.is_not(None),
+        )
+    ).all()
+    done: dict[tuple[str, Decimal], dict[str, Any]] = {}
+    for action_id, result in rows:
+        action = ctx.db.get(ProposedAction, action_id)
+        if action is None or action.status != "executed":
+            continue
+        data = action.extracted_data or {}
+        analysis = {x["index"]: x for x in data.get("analysis", [])}
+        for i, op in enumerate(data.get("operations", [])):
+            inv = ((analysis.get(i) or {}).get("invoice") or {}).get("id")
+            if op.get("type") == "record_payment" and inv and op.get("amount") is not None:
+                done[(str(inv), q2(Decimal(str(op["amount"]))))] = result or {"action_id": str(action.id)}
+    return done
+
+
+def duplicate_checks(
+    ctx: ToolContext, analysis: Analysis
+) -> tuple[set[int], dict[str, Any] | None, list[str]]:
+    """Payments that would be recorded twice. Returns (indexes to drop because this turn already recorded exactly
+    that payment, the earlier result, reasons to read back because a same-amount payment on the same invoice was
+    recorded in the last few minutes)."""
+    done = _payments_done_this_turn(ctx)
+    drop: set[int] = set()
+    earlier: dict[str, Any] | None = None
+    reasons: list[str] = []
+    since = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=RECENT_DUPLICATE_MINUTES)
+    for a in analysis.operations:
+        if a.op.type != "record_payment" or a.invoice.status != "resolved" or a.op.amount is None:
+            continue
+        key = (str(a.invoice.id), q2(a.op.amount))
+        if key in done:
+            drop.add(a.index)
+            earlier = done[key]
+            continue
+        recent = ctx.db.scalar(
+            select(func.count())
+            .select_from(Payment)
+            .where(
+                Payment.business_id == ctx.actor.business_id,
+                Payment.invoice_id == a.invoice.id,
+                Payment.amount == q2(a.op.amount),
+                Payment.created_at >= since,
+            )
+        )
+        if recent:
+            reasons.append(
+                f"a payment of {m(a.op.amount)} on {a.invoice.label} was already recorded in the last "
+                f"{RECENT_DUPLICATE_MINUTES} minutes; this would record a second one"
+            )
+    return drop, earlier, reasons
+
+
 def run_operations(
-    ctx: ToolContext, ops: list[Operation], *, needs_confirmation: bool = False
+    ctx: ToolContext,
+    ops: list[Operation],
+    *,
+    needs_confirmation: bool = False,
+    dates: list[DateDecision] | None = None,
 ) -> dict[str, Any]:
     business = ctx.actor.business
+    dates = dates or []
+    clar = _date_clarification(dates)
+    if clar:
+        return clar
     analysis = analyse(ctx.db, business, ctx.today, ctx.transcript, ops, verify=True)
+    drop, earlier, dup_reasons = duplicate_checks(ctx, analysis)
+    if drop:
+        kept = [op for i, op in enumerate(ops) if i not in drop]
+        if not kept:
+            return {
+                **{k: v for k, v in (earlier or {}).items() if not k.startswith("_")},
+                "status": "completed",
+                "replayed": True,
+                "message": "That payment was already recorded earlier in this turn; it was not recorded again.",
+            }
+        ops = kept
+        analysis = analyse(ctx.db, business, ctx.today, ctx.transcript, ops, verify=True)
     reasons = value_checks(ctx, ops) if analysis.can_approve else []
+    reasons += dup_reasons if analysis.can_approve else []
+    reasons += [d.message or f"the {d.label} needs checking" for d in dates if d.action == "confirm"]
     decision = autonomy_decision(ctx, analysis, needs_confirmation or bool(reasons))
     if decision == "clarify":
         return _clarification(analysis)
@@ -836,6 +1324,12 @@ def run_operations(
         "computed": [a.computed for a in analysis.operations if a.computed],
         "proposal_hash": proposal_hash(action),
     }
+    if dates:
+        preview["dates"] = [d.as_dict() for d in dates]
+    if drop:
+        preview["already_recorded_this_turn"] = (
+            "The payment itself was already recorded earlier in this turn."
+        )
     if reasons:
         preview["confirmation_reasons"] = reasons
     if decision == "owner_approval":
@@ -851,14 +1345,30 @@ def run_operations(
             "message": "Nothing recorded yet. Read the summary back and ask the user to confirm; on 'yes' call "
             "confirm_pending_action with this action_id.",
         }
-    return {**_execute_action(ctx, action), "summary": preview["summary"]}
+    out = _execute_action(ctx, action)
+    if dates:
+        out["dates"] = preview["dates"]
+    if drop:
+        out["already_recorded_this_turn"] = preview["already_recorded_this_turn"]
+    return out
 
 
 def _evidence(a: dict[str, Any]) -> dict[str, str]:
-    ev = {k: str(v) for k, v in (a.get("evidence") or {}).items() if v}
+    raw = a.get("evidence")
+    ev = {str(k): str(v) for k, v in raw.items() if v} if isinstance(raw, dict) else {}
     if "remaining_balance" in ev and "amount_is_remaining" not in ev:
         ev["amount_is_remaining"] = ev["remaining_balance"]
     return ev
+
+
+def _ground_remaining(ctx: ToolContext, op: Operation) -> None:
+    """The 'rest/remaining' flag needs the user's own word for it. Models often set the flag but forget the
+    evidence; take the word from what the user said (never invent it)."""
+    if not op.amount_is_remaining or op.evidence.get("amount_is_remaining"):
+        return
+    hit = REMAINING_WORDS.search(_latest_utterance(ctx)) or REMAINING_WORDS.search(ctx.transcript or "")
+    if hit:
+        op.evidence["amount_is_remaining"] = hit.group(0)
 
 
 def _op(kind: str, a: dict[str, Any], **extra: Any) -> Operation:
@@ -868,9 +1378,46 @@ def _op(kind: str, a: dict[str, Any], **extra: Any) -> Operation:
         customer_name=a.get("customer_name"),
         invoice_reference=a.get("invoice_number"),
         amount=_amount(a.get("amount")),
-        date=_date(a.get("date")),
         evidence=_evidence(a),
         **extra,
+    )
+
+
+def _payment_date(ctx: ToolContext, a: dict[str, Any], *, exclude: tuple[str, ...] = ()) -> DateDecision:
+    return decide_date(
+        ctx,
+        a,
+        "date",
+        label="payment date",
+        evidence_keys=("date", "payment_date"),
+        prefer=dateres.PAST,
+        default_today=True,
+        not_after_today=True,
+        exclude=exclude,
+    )
+
+
+def _promise_date(ctx: ToolContext, a: dict[str, Any], *, with_payment: bool = False) -> DateDecision:
+    # With a payment in the same call, evidence["date"] is the payment's date, never the promise's.
+    keys = (
+        ("expected_payment_date", "promise_date")
+        if with_payment
+        else (
+            "expected_payment_date",
+            "promise_date",
+            "due_date",
+            "date",
+        )
+    )
+    return decide_date(
+        ctx,
+        a,
+        "expected_payment_date",
+        label="promised payment date",
+        evidence_keys=keys,
+        prefer=dateres.FUTURE,
+        required=True,
+        not_before_today=True,
     )
 
 
@@ -897,7 +1444,10 @@ PAY = {
 def record_customer_payment(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     if a.get("amount") in (None, ""):
         return {"status": "needs_clarification", "missing": ["amount"], "message": "How much did they pay?"}
-    return run_operations(ctx, [_op("record_payment", a, payment_method=a.get("payment_method"))])
+    when = _payment_date(ctx, a)
+    op = _op("record_payment", a, payment_method=a.get("payment_method"))
+    _apply_date(op, "date", when)
+    return run_operations(ctx, [op], dates=[when])
 
 
 @tool(
@@ -918,17 +1468,11 @@ def record_customer_payment(ctx: ToolContext, a: dict[str, Any]) -> dict[str, An
     refresh=("financial",),
 )
 def record_payment_promise(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    return run_operations(
-        ctx,
-        [
-            _op(
-                "create_payment_commitment",
-                a,
-                amount_is_remaining=bool(a.get("remaining_balance")),
-                expected_payment_date=_date(a.get("expected_payment_date")),
-            )
-        ],
-    )
+    when = _promise_date(ctx, a)
+    op = _op("create_payment_commitment", a, amount_is_remaining=bool(a.get("remaining_balance")))
+    _apply_date(op, "expected_payment_date", when)
+    _ground_remaining(ctx, op)
+    return run_operations(ctx, [op], dates=[when])
 
 
 @tool(
@@ -948,14 +1492,16 @@ def record_payment_promise(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
     refresh=("financial",),
 )
 def record_payment_and_promise(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    promised_for = _promise_date(ctx, a, with_payment=True)
+    paid_on = _payment_date(ctx, a, exclude=(promised_for.evidence or "",))
     pay = _op("record_payment", a, payment_method=a.get("payment_method"))
-    promise = _op(
-        "create_payment_commitment",
-        {**a, "amount": None, "date": None},
-        amount_is_remaining=True,
-        expected_payment_date=_date(a.get("expected_payment_date")),
-    )
-    return run_operations(ctx, [pay, promise])
+    _apply_date(pay, "date", paid_on)
+    pay.evidence.pop("expected_payment_date", None)
+    promise = _op("create_payment_commitment", {**a, "amount": None}, amount_is_remaining=True)
+    promise.evidence.pop("date", None)
+    _apply_date(promise, "expected_payment_date", promised_for)
+    _ground_remaining(ctx, promise)
+    return run_operations(ctx, [pay, promise], dates=[paid_on, promised_for])
 
 
 @tool(
@@ -1001,18 +1547,17 @@ def create_invoice(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
             "missing": ["amount"],
             "message": "What is the invoice amount?",
         }
-    return run_operations(
+    due = decide_date(
         ctx,
-        [
-            _op(
-                "create_invoice",
-                a,
-                description=a.get("description"),
-                items=items,
-                due_date=_date(a.get("due_date")),
-            )
-        ],
+        a,
+        "due_date",
+        label="invoice due date",
+        evidence_keys=("due_date", "date"),
+        prefer=dateres.FUTURE,
     )
+    op = _op("create_invoice", a, description=a.get("description"), items=items)
+    _apply_date(op, "due_date", due)
+    return run_operations(ctx, [op], dates=[due])
 
 
 @tool(
@@ -1034,19 +1579,52 @@ def create_invoice(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     refresh=("financial",),
 )
 def record_expense(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
+    paid_now = bool(a.get("paid_now"))
+    due = DateDecision("due_date", "bill due date", "ok")
+    if a.get("due_date") or (a.get("evidence") or {}).get("due_date"):
+        due = decide_date(
+            ctx,
+            a,
+            "due_date",
+            label="bill due date",
+            evidence_keys=("due_date",),
+            prefer=dateres.FUTURE,
+        )
+    # The expense/bill date is on or before today; no date words = today.
+    bill_date = decide_date(
+        ctx,
+        a,
+        "date",
+        label="expense date" if paid_now else "bill date",
+        evidence_keys=("date", "bill_date", "expense_date"),
+        prefer=dateres.PAST,
+        default_today=True,
+        not_after_today=True,
+        exclude=(due.evidence or "",),
+    )
+    decisions = [bill_date] + ([due] if due.field and (a.get("due_date") or due.evidence) else [])
     op = Operation(
         type="create_expense",
         vendor_name=a.get("vendor_name"),
         amount=_amount(a.get("amount")),
         description=a.get("description"),
         category=a.get("category"),
-        paid_now=bool(a.get("paid_now")),
-        date=_date(a.get("date")),
-        due_date=_date(a.get("due_date")),
+        paid_now=paid_now,
         payment_method=a.get("payment_method"),
         evidence=_evidence(a),
     )
-    return run_operations(ctx, [op])
+    _apply_date(op, "date", bill_date)
+    _apply_date(op, "due_date", due)
+    start = op.date or ctx.today
+    if op.due_date and op.due_date < start:
+        return {
+            "status": "needs_clarification",
+            "missing": ["due_date"],
+            "dates": [d.as_dict() for d in decisions],
+            "message": f"The due date {op.due_date.isoformat()} is before the bill date {start.isoformat()}. "
+            "Which due date? Nothing was recorded.",
+        }
+    return run_operations(ctx, [op], dates=decisions)
 
 
 @tool(
@@ -1108,7 +1686,7 @@ def confirm_pending_action(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
             "code": "CHANGED_SINCE_READ_BACK",
             "message": "That operation was changed after I read it back, so I did not run it. Please review it.",
         }
-    return {**_execute_action(ctx, action), "summary": _proposal_summary(action)}
+    return _execute_action(ctx, action)
 
 
 def _offered_for_confirmation(
@@ -1147,8 +1725,28 @@ def cancel_pending_action(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
     aid = _uuid(a.get("action_id"))
     if not aid:
         return {"status": "needs_clarification", "message": "Which pending operation?"}
+    action = action_service.get_action(ctx.db, ctx.actor.business_id, aid)
+    # Only something KAIRA read back to this user can be declined here; another user's proposal (e.g. staff work
+    # waiting for the owner) is decided on the Approvals screen, never by a conversational "no".
+    if _offered_for_confirmation(ctx, action_id=action.id, minutes=24 * 60) is None:
+        return {
+            "status": "error",
+            "code": "NOT_OFFERED",
+            "message": "I can only cancel an operation I read back to you. Nothing was changed.",
+        }
+    if action.status == "executed":
+        return {
+            "status": "error",
+            "code": "NOT_PENDING",
+            "message": "That operation was already recorded, so it cannot be cancelled here. Nothing was changed.",
+        }
     action, _ = action_service.reject(ctx.db, ctx.actor, aid, "Declined in conversation with KAIRA")
-    return {"status": "completed", "action_id": str(action.id), "rejected": True}
+    return {
+        "status": "completed",
+        "action_id": str(action.id),
+        "rejected": True,
+        "summary": f"Cancelled: {_proposal_summary(action)}. Nothing was recorded.",
+    }
 
 
 @tool(
@@ -1271,11 +1869,24 @@ def update_customer(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     c, clar = find_customer(ctx, a)
     if clar:
         return clar
-    changes = {k: a[k] for k in ("phone", "email", "address", "notes") if a.get(k)}
+    changes = {k: str(a[k]).strip() for k in ("phone", "email", "address") if a.get(k)}
+    if a.get("notes"):
+        # Notes hold the dated collection history: a new note is appended, never written over it.
+        line = f"[{ctx.today.isoformat()}] {str(a['notes']).strip()[:400]}"
+        changes["notes"] = f"{c.notes}\n{line}" if c.notes else line
     if not changes:
         return {"status": "needs_clarification", "message": "What should change?"}
+    before = {k: getattr(c, k) for k in changes if k != "notes"}
     c = customer_service.update(ctx.db, ctx.actor, c.id, changes)
-    return {"status": "completed", "customer_id": str(c.id), "customer": c.name, "changed": list(changes)}
+    return {
+        "status": "completed",
+        "customer_id": str(c.id),
+        "customer": c.name,
+        "changed": sorted(changes),
+        "before": before,
+        "after": {k: getattr(c, k) for k in changes if k != "notes"},
+        "summary": f"Updated {', '.join(sorted(changes))} for {c.name}",
+    }
 
 
 @tool(
@@ -1346,28 +1957,73 @@ def record_missed_promise(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
 @tool(
     "update_invoice",
     "Change an invoice's due date or notes (amounts are changed only via items before any payment).",
-    {"invoice_number": S, "due_date": S, "notes": S},
+    {"invoice_number": S, "due_date": {**S, "description": "YYYY-MM-DD"}, "notes": S, "evidence": EVIDENCE},
     kind="write",
     required=("invoice_number",),
     refresh=("financial",),
 )
 def update_invoice(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    inv = ctx.db.scalar(
-        select(Invoice).where(
-            Invoice.business_id == ctx.actor.business_id,
-            func.upper(Invoice.invoice_number) == str(a["invoice_number"]).upper(),
-        )
-    )
+    inv = find_invoice(ctx, a["invoice_number"])
     if inv is None:
         return {"status": "needs_clarification", "message": f"No invoice {a['invoice_number']}."}
-    changes = {k: v for k, v in {"due_date": _date(a.get("due_date")), "notes": a.get("notes")}.items() if v}
+    changes: dict[str, Any] = {}
+    out_dates: list[dict[str, Any]] = []
+    if a.get("due_date") or (a.get("evidence") or {}).get("due_date"):
+        due = decide_date(
+            ctx,
+            a,
+            "due_date",
+            label="new due date",
+            evidence_keys=("due_date", "date"),
+            prefer=dateres.FUTURE,
+        )
+        out_dates.append(due.as_dict())
+        # There is no read-back step for this edit, so any disagreement between the words and the proposed date
+        # is asked about instead of being applied.
+        if due.action in ("clarify", "confirm") or due.value is None:
+            return {
+                "status": "needs_clarification",
+                "missing": ["due_date"],
+                "dates": out_dates,
+                "message": (due.message or "What is the new due date?") + " Nothing was changed.",
+            }
+        changes["due_date"] = due.value
+    if a.get("notes"):
+        changes["notes"] = a["notes"]
     if not changes:
         return {"status": "needs_clarification", "message": "What should change on the invoice?"}
+    before = inv.due_date.isoformat() if inv.due_date else None
     invoice_service.update_invoice(ctx.db, ctx.actor, inv.id, changes)
-    return {
+    row = invoice_row(invoice_service.invoice_detail(ctx.db, ctx.actor.business, inv.id))
+    # The invoice's payment status must not overwrite the tool status ("unpaid" would read as not done).
+    out = {
+        **row,
+        "payment_status": row["status"],
         "status": "completed",
-        **invoice_row(invoice_service.invoice_detail(ctx.db, ctx.actor.business, inv.id)),
+        "changed": sorted(changes),
+        "summary": f"Updated {' and '.join(sorted(changes))} of {row['invoice_number']}"
+        + (f"; due {row['due_date']}" if "due_date" in changes else ""),
     }
+    if "due_date" in changes:
+        out["due_date_before"] = before
+        out["dates"] = out_dates
+    return out
+
+
+def find_invoice(ctx: ToolContext, ref: Any) -> Invoice | None:
+    """An invoice of this business by number as spoken: 'INV-0018', 'inv 18', '18'."""
+    raw = str(ref or "").strip()
+    if not raw:
+        return None
+    for number in dict.fromkeys([raw.upper(), normalise_invoice_number(raw)]):
+        inv = ctx.db.scalar(
+            select(Invoice).where(
+                Invoice.business_id == ctx.actor.business_id, func.upper(Invoice.invoice_number) == number
+            )
+        )
+        if inv is not None:
+            return inv
+    return None
 
 
 @tool(
@@ -1378,12 +2034,7 @@ def update_invoice(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     required=("invoice_number",),
 )
 def invoice_status(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    inv = ctx.db.scalar(
-        select(Invoice).where(
-            Invoice.business_id == ctx.actor.business_id,
-            func.upper(Invoice.invoice_number) == str(a["invoice_number"]).upper(),
-        )
-    )
+    inv = find_invoice(ctx, a["invoice_number"])
     if inv is None:
         return {"status": "needs_clarification", "message": f"No invoice {a['invoice_number']}."}
     return invoice_row(invoice_service.invoice_detail(ctx.db, ctx.actor.business, inv.id))
