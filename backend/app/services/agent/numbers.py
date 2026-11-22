@@ -6,6 +6,7 @@ was spoken. Returns None when the phrase cannot be parsed - callers then ask for
 from __future__ import annotations
 
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 UNITS = {
@@ -129,8 +130,22 @@ IGNORE = {"and", "rupees", "rupee", "rs", "inr", "only", "रुपये", "र
 _TOKEN = re.compile(r"\d[\d,]*(?:\.\d+)?|[^\s\d,.₹/-]+")
 
 
+def _nfc_keys(table):
+    return (
+        {unicodedata.normalize("NFC", k): v for k, v in table.items()}
+        if isinstance(table, dict)
+        else {unicodedata.normalize("NFC", k) for k in table}
+    )
+
+
+UNITS = _nfc_keys(UNITS)
+HUNDRED = _nfc_keys(HUNDRED)
+SCALES = _nfc_keys(SCALES)
+IGNORE = _nfc_keys(IGNORE)
+
+
 def spoken_amount(fragment: str) -> Decimal | None:
-    text = (fragment or "").strip().lower().replace("₹", " ")
+    text = unicodedata.normalize("NFC", (fragment or "")).strip().lower().replace("₹", " ")
     if not text:
         return None
     total = Decimal(0)

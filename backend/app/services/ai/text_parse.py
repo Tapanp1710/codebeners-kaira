@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import calendar
 import re
+import unicodedata
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -206,7 +207,8 @@ def normalise_invoice_number(ref: str) -> str:
 
 
 def normalise_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
+    # NFC first: "ज़" may be one code point (U+095B) or two (U+091C U+093C) depending on the source.
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip().casefold()
 
 
 # ------------------------------------------------------------------ Indic names -> Latin (for matching only)

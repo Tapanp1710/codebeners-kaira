@@ -112,3 +112,30 @@ def test_amount_evidence_key_does_not_matter_but_the_words_do():
     assert not amount_evidenced(
         Decimal("7000"), {"amount": "six thousand"}, said
     )  # said, but a different amount
+
+
+def test_hindi_evidence_matches_across_unicode_normal_forms():
+    """D2: 'ज़' precomposed (U+095B) and decomposed (U+091C U+093C) are the same word."""
+    from app.services.ai.text_parse import normalise_text
+
+    precomposed, decomposed = "\u095b", "\u091c\u093c"
+    said = f"रमेश ने पाँच ह{precomposed}ार रुपये दिए"
+    fragment = f"पाँच ह{decomposed}ार"
+    assert normalise_text(fragment) in normalise_text(said)
+    assert spoken_amount(fragment) == spoken_amount(f"पाँच ह{precomposed}ार") == Decimal("5000.00")
+
+
+def test_execution_keys_fit_the_column_for_long_turn_ids():
+    """D1: a 64-char turn id plus the ':failed:<ms>' suffix must stay within String(128)."""
+    import uuid as _uuid
+
+    from app.services.agent.orchestrator import execution_key, operation_digest
+
+    key = execution_key(
+        _uuid.uuid4(), "t" * 64, "confirm_pending_action", operation_digest({"action_id": "x"})
+    )
+    assert len(key + ":failed:" + "1" * 13) <= 128
+    assert key.startswith("x1:") and len(key) == 67
+    # deterministic: the same parts give the same key (replay lookups rely on it)
+    same = execution_key(_uuid.UUID(int=1), "t", "x", "d")
+    assert same == execution_key(_uuid.UUID(int=1), "t", "x", "d")

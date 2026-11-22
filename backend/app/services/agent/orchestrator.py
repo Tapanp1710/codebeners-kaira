@@ -264,9 +264,9 @@ def _exec_tool(
     kind = toolset.REGISTRY[name].kind if name in toolset.REGISTRY else "read"
     started = time.perf_counter()
     if kind == "read":
-        key = f"{user_id}:{turn_id}:{name}:read:{time.time_ns()}"  # reads are safe to repeat; never replayed
+        key = execution_key(user_id, turn_id, name, "read", time.time_ns())  # reads are never replayed
     else:
-        key = f"{user_id}:{turn_id}:{name}:{operation_digest(args)}"
+        key = execution_key(user_id, turn_id, name, operation_digest(args))
     with factory() as db:
         existing = db.scalar(
             select(AgentToolExecution).where(
@@ -362,6 +362,12 @@ def _exec_tool(
         execution.duration_ms = int((time.perf_counter() - started) * 1000)
         db.commit()
         return {**full, "_events": ctx.events, "_execution_id": str(execution.id)}
+
+
+def execution_key(*parts: Any) -> str:
+    """Fixed-length idempotency key ("x1:" + 64 hex = 67 chars; +":failed:<ms>" stays far below the column's 128).
+    The same parts always give the same key, so replay lookups are unchanged."""
+    return "x1:" + hashlib.sha256(":".join(str(p) for p in parts).encode()).hexdigest()
 
 
 def operation_digest(args: dict[str, Any]) -> str:
