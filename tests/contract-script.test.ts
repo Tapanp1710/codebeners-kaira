@@ -9,7 +9,11 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Each check spawns a real node process that runs openapi-typescript (about 1.5-4 s here, slower on shared CI
+// runners). The 5 s default timeout made these flaky under parallel load; assertions are unchanged.
+vi.setConfig({ testTimeout: 30_000 });
 
 const REPO = join(__dirname, "..");
 let root: string;
