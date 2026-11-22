@@ -15,10 +15,12 @@
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 
+import { DemoLogin } from "@/components/auth/demo-login";
 import { Field, FormError, Input } from "@/components/ui/form";
 import { Button, Notice } from "@/components/ui/primitives";
 import { login, refreshSession } from "@/lib/api/client";
 import { describeError } from "@/lib/api/errors";
+import { DEMO_ACCOUNT, type DemoAccount } from "@/lib/demo-account";
 
 /** Only same-origin relative paths are accepted as a post-login destination (no open redirects). */
 export function safeNext(next: string | null): string {
@@ -65,10 +67,21 @@ export function LoginForm() {
    */
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    await signIn(email, password);
+  }
+
+  /** "Login as Demo": fill the fields with the public evaluator account, then run the same sign-in flow. */
+  function onDemoLogin(account: DemoAccount) {
+    setEmail(account.email);
+    setPassword(account.password);
+    void signIn(account.email, account.password);
+  }
+
+  async function signIn(emailValue: string, passwordValue: string) {
     setError(null);
     setSubmitting(true);
     try {
-      await login(email.trim(), password);
+      await login(emailValue.trim(), passwordValue);
       window.location.assign(next);
     } catch (err) {
       // Shows the backend's envelope message (e.g. invalid credentials) or the network/timeout message.
@@ -88,36 +101,39 @@ export function LoginForm() {
   }
 
   return (
-    <form onSubmit={onSubmit} className="w-full max-w-sm space-y-5" noValidate>
-      <div>
-        <h1 className="font-display text-3xl font-semibold">Sign in</h1>
-        <p className="mt-1 text-sm text-muted">Use the account your KAIRA administrator created.</p>
-      </div>
-      {/* expired=1 comes from the API client's session-lost handler; a warn Notice is role="note", so it is read in order rather than interrupting. */}
-      {params.get("expired") === "1" && <Notice tone="warn">Your session expired. Please sign in again.</Notice>}
-      {/* autoComplete username/current-password lets password managers fill the form; with noValidate on the form, `required` does not block submit. */}
-      <Field label="Email">
-        {(id) => (
-          <Input id={id} type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        )}
-      </Field>
-      <Field label="Password">
-        {(id) => (
-          <Input
-            id={id}
-            type="password"
-            autoComplete="current-password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        )}
-      </Field>
-      <FormError message={error} />
-      {/* Enabled once both raw values are non-empty (a whitespace-only email still enables it); every credential check happens on the backend. */}
-      <Button type="submit" size="lg" className="w-full" loading={submitting} disabled={!email || !password}>
-        Sign in
-      </Button>
-    </form>
+    <div className="w-full max-w-sm space-y-8">
+      <form onSubmit={onSubmit} className="w-full space-y-5" noValidate>
+        <div>
+          <h1 className="font-display text-3xl font-semibold">Sign in</h1>
+          <p className="mt-1 text-sm text-muted">Use the account your KAIRA administrator created.</p>
+        </div>
+        {/* expired=1 comes from the API client's session-lost handler; a warn Notice is role="note", so it is read in order rather than interrupting. */}
+        {params.get("expired") === "1" && <Notice tone="warn">Your session expired. Please sign in again.</Notice>}
+        {/* autoComplete username/current-password lets password managers fill the form; with noValidate on the form, `required` does not block submit. */}
+        <Field label="Email">
+          {(id) => (
+            <Input id={id} type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          )}
+        </Field>
+        <Field label="Password">
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          )}
+        </Field>
+        <FormError message={error} />
+        {/* Enabled once both raw values are non-empty (a whitespace-only email still enables it); every credential check happens on the backend. */}
+        <Button type="submit" size="lg" className="w-full" loading={submitting} disabled={!email || !password}>
+          Sign in
+        </Button>
+      </form>
+      {DEMO_ACCOUNT && <DemoLogin account={DEMO_ACCOUNT} onLogin={onDemoLogin} busy={submitting} />}
+    </div>
   );
 }
