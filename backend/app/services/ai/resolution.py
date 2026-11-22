@@ -75,6 +75,9 @@ class Resolved:
     id: uuid.UUID | None = None
     label: str | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
+    mismatch: str | None = (
+        None  # why a customer id was not trusted (it names someone other than the user said)
+    )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -95,7 +98,11 @@ def verify_evidence(transcript: str, op: Operation, index: int, warnings: list[W
         if value in (None, False):
             continue
         fragment = op.evidence.get(name)
-        verified = bool(fragment) and normalise_text(fragment) in norm_transcript
+        verified = (
+            bool(fragment)
+            and normalise_text(fragment) in norm_transcript
+            and evidence_matches_value(name, value, fragment)
+        )
         if fragment:
             evidence_out.append(
                 {"field": name, "fragment": fragment, "verified": verified, "operation_index": index}
@@ -122,7 +129,29 @@ def verify_evidence(transcript: str, op: Operation, index: int, warnings: list[W
     return evidence_out
 
 
+def _invoice_digits(ref: str) -> int | None:
+    digits = re.sub(r"\D", "", ref or "")
+    return int(digits) if digits else None
+
+
+def evidence_matches_value(name: str, value: Any, fragment: str) -> bool:
+    """The user's words for a value must mean that value, not just appear somewhere in the transcript: the words
+    "Ramesh" do not evidence the customer name "Suresh", and "INV-0018" does not evidence INV-0019."""
+    if name in ("customer_name", "vendor_name") and isinstance(value, str):
+        return name_score(fragment, value) >= NAME_MATCH or name_score(value, fragment) >= NAME_MATCH
+    if name == "invoice_reference" and isinstance(value, str):
+        said, ref = _invoice_digits(fragment), _invoice_digits(value)
+        if said is None or ref is None:
+            return normalise_invoice_number(fragment) == normalise_invoice_number(value)
+        return said == ref
+    return True
+
+
 # ------------------------------------------------------------------ customers
+# A name the user said counts as naming a stored customer from this score up (same bar as a resolution candidate).
+NAME_MATCH = 0.75
+
+
 def _clean_name(name: str) -> str:
     # Indic-script names are romanized first so "రమేష్" / "रमेश" match a customer stored as "Ramesh".
     tokens = [t for t in re.split(r"[^\w]+", romanize(name).casefold()) if t and t not in HONORIFICS]
@@ -143,15 +172,45 @@ def name_score(query: str, candidate: str) -> float:
 
 
 def resolve_customer(
-    db: Session, business_id: uuid.UUID, op: Operation, outstanding: dict[uuid.UUID, Decimal]
+    db: Session,
+    business_id: uuid.UUID,
+    op: Operation,
+    outstanding: dict[uuid.UUID, Decimal],
+    *,
+    strict_name: bool = False,
 ) -> Resolved:
+    """strict_name (values taken from the user's words): a customer_id must agree with the name the user said
+    (customer_name and its evidence). An id that names someone else is never trusted: the result is ambiguous with
+    both the id's customer and the customers matching the spoken name as candidates, so nothing is written
+    silently. A near match (e.g. a misheard spelling) resolves with its score so it is read back first."""
     if op.customer_id:
         c = db.scalar(
             select(Customer).where(Customer.id == op.customer_id, Customer.business_id == business_id)
         )
         if c is None:
             return Resolved("not_found")
-        return Resolved("resolved", c.id, c.name)
+        said = [n for n in (op.customer_name, op.evidence.get("customer_name")) if n and n.strip()]
+        if not strict_name or not said:
+            return Resolved("resolved", c.id, c.name)
+        score = min(name_score(n, c.name) for n in said)
+        own = {
+            "id": str(c.id),
+            "label": c.name,
+            "score": score,
+            "outstanding": money_str(outstanding.get(c.id, ZERO)),
+        }
+        if score >= NAME_MATCH:
+            return Resolved("resolved", c.id, c.name, [own])
+        by_name = resolve_customer(
+            db, business_id, Operation(type=op.type, customer_name=said[0]), outstanding
+        ).candidates
+        return Resolved(
+            "ambiguous",
+            None,
+            None,
+            [own, *[x for x in by_name if x["id"] != own["id"]]][:5],
+            mismatch=f"'{said[0]}' does not match the customer {c.name}",
+        )
     if not op.customer_name:
         return Resolved("not_found")
     customers = db.execute(
@@ -163,7 +222,7 @@ def resolve_customer(
     candidates = [
         {"id": str(cid), "label": n, "score": s, "outstanding": money_str(outstanding.get(cid, ZERO))}
         for s, cid, n in scored
-        if s >= 0.75
+        if s >= NAME_MATCH
     ][:5]
     strong = [x for x in scored if x[0] >= 0.9]
     if len(strong) == 1:
@@ -330,8 +389,17 @@ def analyse(
             elif op.type == "record_sale" and not op.customer_name and not op.customer_id:
                 customer = Resolved("not_applicable")
             else:
-                customer = resolve_customer(db, business.id, op, outstanding_by_customer)
-            if customer.status == "not_found" and (op.customer_name or op.customer_id):
+                customer = resolve_customer(db, business.id, op, outstanding_by_customer, strict_name=verify)
+            if customer.mismatch:
+                warnings.append(
+                    Warn(
+                        "CUSTOMER_MISMATCH",
+                        f"{customer.mismatch}; nothing was recorded. Which customer did you mean?",
+                        index,
+                        True,
+                    )
+                )
+            elif customer.status == "not_found" and (op.customer_name or op.customer_id):
                 blocking = op.type != "record_sale"
                 warnings.append(
                     Warn(
@@ -360,7 +428,8 @@ def analyse(
                 warnings.append(
                     Warn(
                         "FUZZY_CUSTOMER_MATCH",
-                        f"'{op.customer_name}' was matched to '{customer.label}'. Please confirm.",
+                        f"'{op.customer_name or op.evidence.get('customer_name')}' was matched to "
+                        f"'{customer.label}'. Please confirm.",
                         index,
                     )
                 )
