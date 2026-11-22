@@ -35,7 +35,7 @@ reply (`replayed: true`) and runs no tool again. That is how a client recovers a
 
 ## WebSocket `GET {ws_url}?ticket=<ticket>`
 
-The ticket is valid for 60 s. Ask `POST /agent/session` again (with `resume_session_id`) for each reconnect. The
+The ticket is valid for 60 s and only once (audience `kaira-agent-ws`). Ask `POST /agent/session` again (with `resume_session_id`) for each reconnect. The user must still be active at connect. The
 `Origin` header must be one of the backend's `CORS_ORIGINS`. Close codes: `1008` bad origin/ticket, `1000` normal.
 
 ### Client -> server
@@ -90,11 +90,13 @@ belonging to the current reply. Play them in order, gaplessly. Drop everything b
 
 | Situation | Result |
 |---|---|
-| Owner, all values evidenced in the user's own words, customer/invoice resolved, no soft warning except a defaulted date | Executed immediately (`completed`) |
-| Fuzzy customer match, removed unsupported value, possible duplicate customer, or `AGENT_AUTONOMY=confirm` | `needs_confirmation` (proposal stored; `confirm_pending_action` executes it after a spoken yes) |
+| Owner, all values evidenced in the user's own words, the spoken amount parses to exactly the amount (digits or English/Hindi/Telugu number words), customer named or taken from an earlier result, customer/invoice resolved, no soft warning except a defaulted date | Executed immediately (`completed`) |
+| Fuzzy customer match, removed unsupported value, unparsed or mismatched amount, unreferenced customer_id, invoice line items, possible duplicate customer, or `AGENT_AUTONOMY=confirm` | `needs_confirmation` (proposal stored and listed on Approvals). `confirm_pending_action` executes it only in a LATER turn of the same user, within 30 min, if the proposal is unchanged since it was read back |
 | Missing amount/customer, ambiguous customer or invoice, over-payment | `needs_clarification`; nothing stored |
 | Staff user | `needs_owner_approval`; the owner approves in the app |
-| Payment amount correction | An increase records only the difference after confirmation; a decrease is refused (no reversal service exists) |
+| Payment amount correction | An increase records only the difference (counting earlier corrections) after the user confirms it in a later turn and the amount is evidenced; a decrease is refused (no reversal service exists) |
+
+Utterances the model judges not addressed to KAIRA are ignored and never re-enter the context. A turn is claimed atomically (one per `turn_id` and user); a cancelled turn never starts a write; one turn runs at a time per live session. Spoken and typed turns share the per-user AI rate limit; audio frames are capped at 1 s and may not arrive faster than real time.
 
 Financial writes run through the existing proposal pipeline (`analyse` -> `create_proposal` -> `approve`): row
 locks, per-operation idempotency keys, audit rows linked to the action, exactly once. Each tool call also has an
