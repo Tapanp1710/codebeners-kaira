@@ -3,8 +3,17 @@
  * folds everything into one state through the pure reducer (./reducer). It is a small external store
  * (subscribe/getSnapshot) consumed by components/agent/agent-provider.tsx via useSyncExternalStore.
  *
- * Lifecycle: attach() on mount (history, readiness, "resume" hint), enable()/disable() from explicit user actions,
- * detach() on unmount (releases mic/socket/audio, keeps the user's live preference for a reload).
+ * Lifecycle: attach() on mount (history, readiness, "resume" hint, cross-tab watch), enable()/disable() from
+ * explicit user actions, detach() on unmount (releases mic/socket/audio/tab lock, keeps the user's live preference
+ * for a reload).
+ *
+ * Audio is streamed continuously while live and not muted, silence included: the client VAD never gates frames
+ * (Sarvam's server VAD and prefix padding need the audio before the first syllable). Frames captured while the socket
+ * is not open (connecting, reconnecting) go to a PREROLL_MS ring buffer that is flushed, in order, the moment it opens.
+ *
+ * Only one tab may hold the live microphone session (./tab-lock: Web Locks + BroadcastChannel); the others report
+ * `liveElsewhere` and keep typed input. Mic/output levels live in a separate tiny store (subscribeLevels/getLevels)
+ * so the ~20 Hz level updates re-render only the orb (components/agent/agent-provider.tsx useAgentLevels()).
  */
 import { ApiError } from "@/lib/api/errors";
 
@@ -19,10 +28,11 @@ import {
 import { MicCapture, MicError, micSupportError, type MicFrame } from "./mic";
 import { PcmPlayer } from "./player";
 import { rmsToLevel, smoothLevel } from "./pcm";
-import { MIC_SAMPLE_RATE, type AgentSessionTicket, type ServerEvent } from "./protocol";
+import { MIC_SAMPLE_RATE, type AgentLevels, type AgentSessionTicket, type ServerEvent } from "./protocol";
 import {
   eventIntents,
   initialAgentState,
+  LIVE_ELSEWHERE_CODE,
   reduceAgentEvent,
   type AgentEngineState,
   type AgentEvent,
@@ -30,14 +40,44 @@ import {
 } from "./reducer";
 import { PreRollBuffer } from "./ring-buffer";
 import { AgentSocket, FatalSocketError, type SocketLike } from "./socket";
+import { BrowserTabLock, type LiveTabLock } from "./tab-lock";
 import { EnergyVad } from "./vad";
 
-export const PREROLL_MS = 400;
+/**
+ * Audio kept while the socket is not open (initial connect after the permission prompt, reconnects). Flushed in
+ * PREROLL_CHUNK_MS pieces (the server accepts frames of at most 1 s and paces with 10 s of slack).
+ */
+export const PREROLL_MS = 1500;
+export const PREROLL_CHUNK_MS = 250;
 /** Sustained user speech over KAIRA's voice for this long stops playback locally and sends an interrupt. */
 export const LOCAL_BARGE_STOP_MS = 600;
 const LEVEL_INTERVAL_MS = 50;
 const STORAGE_LIVE = "kaira.agent.live";
 const STORAGE_SESSION = "kaira.agent.session";
+export const ZERO_LEVELS: AgentLevels = Object.freeze({ mic: 0, output: 0 });
+export const LIVE_ELSEWHERE_MESSAGE =
+  "Live voice is already on in another KAIRA tab. Turn it off there (or close that tab) to use it here. Typed input still works.";
+
+/** Browser connectivity (online/offline events). */
+export type NetworkMonitor = {
+  isOnline: () => boolean;
+  subscribe: (listener: (online: boolean) => void) => () => void;
+};
+
+export const browserNetwork: NetworkMonitor = {
+  isOnline: () => (typeof navigator !== "undefined" && typeof navigator.onLine === "boolean" ? navigator.onLine : true),
+  subscribe: (listener) => {
+    if (typeof window === "undefined") return () => {};
+    const on = () => listener(true);
+    const off = () => listener(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  },
+};
 
 export type EngineDeps = {
   startSession: (resumeSessionId: string | null) => Promise<AgentSessionTicket>;
@@ -49,6 +89,10 @@ export type EngineDeps = {
   createMic: () => MicCapture;
   storage: () => Storage | null;
   origin: () => string;
+  /** Cross-tab ownership of the live session (default: Web Locks + BroadcastChannel). */
+  createTabLock?: () => LiveTabLock;
+  /** Connectivity events (default: window online/offline). */
+  network?: NetworkMonitor;
 };
 
 function browserStorage(): Storage | null {
@@ -69,6 +113,8 @@ export const defaultEngineDeps: EngineDeps = {
   createMic: () => new MicCapture(),
   storage: browserStorage,
   origin: () => (typeof window !== "undefined" ? window.location.origin : "http://localhost"),
+  createTabLock: () => new BrowserTabLock(),
+  network: browserNetwork,
 };
 
 function errorMessage(error: unknown, fallback: string): { code: string; message: string } {
@@ -96,6 +142,11 @@ export class AgentEngine {
   private readonly pendingTextTurns = new Map<string, string>();
   /** Typed turns currently running over REST. */
   private readonly restTurns = new Set<string>();
+  private lock: LiveTabLock | null = null;
+  private unwatchLock: (() => void) | null = null;
+  private unsubscribeNetwork: (() => void) | null = null;
+  private levels: AgentLevels = ZERO_LEVELS;
+  private readonly levelListeners = new Set<() => void>();
 
   constructor(private readonly deps: EngineDeps = defaultEngineDeps) {}
 
@@ -106,6 +157,27 @@ export class AgentEngine {
   };
 
   getSnapshot = (): AgentEngineState => this.state;
+
+  /**
+   * Levels store (~20 Hz while live). While at least one component subscribes here, the levels are no longer
+   * copied into the main state, so the main context does not re-render 20x/s; without a subscriber they are (the
+   * deprecated useAgent().micLevel/outputLevel keep working).
+   */
+  subscribeLevels = (listener: () => void): (() => void) => {
+    this.levelListeners.add(listener);
+    if (this.levelListeners.size === 1) this.dispatch({ type: "local.levels", mic: 0, output: 0 });
+    return () => this.levelListeners.delete(listener);
+  };
+
+  getLevels = (): AgentLevels => this.levels;
+
+  private setLevels(mic: number, output: number): void {
+    if (mic !== this.levels.mic || output !== this.levels.output) {
+      this.levels = mic === 0 && output === 0 ? ZERO_LEVELS : { mic, output };
+      this.levelListeners.forEach((l) => l());
+    }
+    if (this.levelListeners.size === 0) this.dispatch({ type: "local.levels", mic, output });
+  }
 
   setIntentHandler(handler: ((intent: AgentIntent) => void) | null): void {
     this.intentHandler = handler;
@@ -123,6 +195,10 @@ export class AgentEngine {
 
   // ------------------------------------------------------------------ lifecycle
   attach(): void {
+    if (!this.unwatchLock) {
+      const lock = this.getLock();
+      this.unwatchLock = lock?.watch((elsewhere) => this.dispatch({ type: "local.live_elsewhere", value: elsewhere })) ?? null;
+    }
     const storage = this.deps.storage();
     // A reload never re-opens the microphone by itself; it only offers to resume.
     if (storage?.getItem(STORAGE_LIVE) === "1" && !this.state.live) this.dispatch({ type: "local.resume_available", value: true });
@@ -144,6 +220,10 @@ export class AgentEngine {
     this.enableSeq++;
     this.teardown();
     if (this.state.live) this.dispatch({ type: "local.live", live: false });
+    this.unwatchLock?.();
+    this.unwatchLock = null;
+    this.lock?.dispose();
+    this.lock = null;
   }
 
   // ------------------------------------------------------------------ public actions
@@ -172,6 +252,23 @@ export class AgentEngine {
     const resumed = ctx.state === "suspended" ? ctx.resume().catch(() => {}) : Promise.resolve();
     this.dispatch({ type: "local.live", live: true });
     this.dispatch({ type: "local.connection", state: "connecting" });
+
+    // Only one tab may hold the live microphone session.
+    const lock = this.getLock();
+    const owned = lock ? await lock.acquire() : true;
+    if (seq !== this.enableSeq) {
+      // disable()/detach() ran meanwhile (its teardown may have come before the lock was granted).
+      if (owned && !this.state.live) lock?.release();
+      return;
+    }
+    if (!owned) {
+      this.enableSeq++;
+      this.teardown();
+      this.dispatch({ type: "local.live", live: false });
+      this.dispatch({ type: "local.live_elsewhere", value: true });
+      this.dispatch({ type: "local.error", error: { code: LIVE_ELSEWHERE_CODE, message: LIVE_ELSEWHERE_MESSAGE, fatal: false } });
+      return;
+    }
     this.deps.storage()?.setItem(STORAGE_LIVE, "1");
 
     const mic = this.deps.createMic();
@@ -215,6 +312,14 @@ export class AgentEngine {
     );
     this.socket = socket;
     if (this.state.muted) socket.setMuted(true);
+    const network = this.deps.network;
+    if (network) {
+      socket.setOffline(!network.isOnline());
+      this.unsubscribeNetwork?.();
+      this.unsubscribeNetwork = network.subscribe((online) => {
+        if (this.socket === socket) socket.setOffline(!online);
+      });
+    }
     socket.connect(this.deps.storage()?.getItem(STORAGE_SESSION) ?? null);
     this.startLevels();
   };
@@ -255,6 +360,9 @@ export class AgentEngine {
     this.dispatch({ type: "local.turn_pending", turn_id: turnId, text: trimmed, at: new Date().toISOString(), mode: "text" });
     if (this.socket?.isOpen && this.socket.send({ type: "text", text: trimmed, turn_id: turnId })) {
       this.pendingTextTurns.set(turnId, trimmed);
+      // A silently dead socket would swallow the turn: ping now, so a lost connection is noticed within
+      // PONG_TIMEOUT_MS and the turn is replayed over REST with the same turn_id.
+      this.socket.probe();
       return;
     }
     await this.runRestTurn(turnId, trimmed);
@@ -263,10 +371,28 @@ export class AgentEngine {
   // ------------------------------------------------------------------ internals
   private ensureContext(): AudioContext {
     if (!this.ctx || this.ctx.state === "closed") {
-      this.ctx = this.deps.createAudioContext();
-      this.player = new PcmPlayer(this.ctx);
+      const ctx = this.deps.createAudioContext();
+      this.ctx = ctx;
+      this.player = new PcmPlayer(ctx);
+      // The OS or browser can suspend/interrupt audio mid-session (another app takes the device, iOS call):
+      // resume while live so capture and playback continue.
+      ctx.onstatechange = () => {
+        const st = ctx.state as string;
+        if (this.ctx === ctx && this.state.live && (st === "suspended" || st === "interrupted")) void ctx.resume().catch(() => {});
+      };
     }
     return this.ctx;
+  }
+
+  private getLock(): LiveTabLock | null {
+    if (!this.lock && this.deps.createTabLock) {
+      try {
+        this.lock = this.deps.createTabLock();
+      } catch {
+        this.lock = null;
+      }
+    }
+    return this.lock;
   }
 
   private requestTicket = async (resumeSessionId: string | null): Promise<AgentSessionTicket> => {
@@ -408,13 +534,14 @@ export class AgentEngine {
     this.player?.duck(false);
   }
 
+  /** Sends the pre-roll (oldest first, in PREROLL_CHUNK_MS pieces) before any newer frame. */
   private flushPreRoll(): void {
-    if (this.preRoll.size === 0 || !this.socket?.isOpen || this.state.muted) {
-      this.preRoll.clear();
-      return;
-    }
+    if (this.preRoll.size === 0) return;
+    if (this.state.muted) return this.preRoll.clear();
+    if (!this.socket?.isOpen) return; // keep it for the open
     const samples = this.preRoll.drain();
-    this.socket.sendAudio(samples.buffer);
+    const chunk = (MIC_SAMPLE_RATE * PREROLL_CHUNK_MS) / 1000;
+    for (let i = 0; i < samples.length; i += chunk) this.socket.sendAudio(samples.slice(i, i + chunk).buffer);
   }
 
   private onMicEnded = (): void => {
@@ -436,9 +563,7 @@ export class AgentEngine {
     this.levelTimer = setInterval(() => {
       mic = this.state.muted ? 0 : smoothLevel(mic, rmsToLevel(this.lastMicRms));
       out = smoothLevel(out, rmsToLevel(this.player?.level() ?? 0));
-      const m = Math.round(mic * 50) / 50;
-      const o = Math.round(out * 50) / 50;
-      this.dispatch({ type: "local.levels", mic: m, output: o });
+      this.setLevels(Math.round(mic * 50) / 50, Math.round(out * 50) / 50);
     }, LEVEL_INTERVAL_MS);
   }
 
@@ -446,11 +571,14 @@ export class AgentEngine {
     if (this.levelTimer) clearInterval(this.levelTimer);
     this.levelTimer = null;
     this.lastMicRms = 0;
+    this.setLevels(0, 0);
     this.dispatch({ type: "local.levels", mic: 0, output: 0 });
   }
 
   /** Stops and releases mic, socket, playback and the AudioContext. Idempotent. */
   private teardown(): void {
+    this.unsubscribeNetwork?.();
+    this.unsubscribeNetwork = null;
     const socket = this.socket;
     this.socket = null;
     socket?.disconnect();
@@ -458,8 +586,12 @@ export class AgentEngine {
     this.mic = null;
     this.player?.dispose();
     this.player = null;
-    if (this.ctx && this.ctx.state !== "closed") void this.ctx.close().catch(() => {});
+    if (this.ctx) {
+      this.ctx.onstatechange = null;
+      if (this.ctx.state !== "closed") void this.ctx.close().catch(() => {});
+    }
     this.ctx = null;
+    this.lock?.release();
     this.vad.reset();
     this.preRoll.clear();
     this.bargeStartedAt = null;

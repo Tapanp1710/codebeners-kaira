@@ -10,6 +10,7 @@ import {
   HIGH_WATER_BYTES,
   MAX_RECONNECT_ATTEMPTS,
   PING_INTERVAL_MS,
+  PONG_TIMEOUT_MS,
   type SocketStatus,
 } from "@/lib/agent/socket";
 import type { ServerEvent } from "@/lib/agent/protocol";
@@ -171,5 +172,104 @@ describe("AgentSocket", () => {
     sock.disconnect();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(FakeSocket.instances).toHaveLength(1);
+  });
+});
+
+describe("AgentSocket dead-connection and offline handling", () => {
+  it("a ping with no reply within PONG_TIMEOUT_MS drops the socket and reconnects with a fresh ticket", async () => {
+    const { sock, statuses, requestTicket } = setup();
+    sock.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = last();
+    first.serverOpen();
+    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
+    expect(first.json()).toContainEqual({ type: "ping" });
+    await vi.advanceTimersByTimeAsync(PONG_TIMEOUT_MS - 1);
+    expect(first.closedWith).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first.closedWith).toBe(4000);
+    expect(statuses.at(-1)).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(FakeSocket.instances).toHaveLength(2);
+    expect(requestTicket).toHaveBeenLastCalledWith(ticket(1).session_id);
+    sock.disconnect();
+  });
+
+  it("any server frame proves the connection alive", async () => {
+    const { sock } = setup();
+    sock.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    last().serverOpen();
+    sock.probe();
+    expect(last().json()).toEqual([{ type: "ping" }]);
+    sock.probe(); // already outstanding: no second ping
+    expect(last().json()).toHaveLength(1);
+    last().serverBinary(new ArrayBuffer(4)); // TTS audio counts too
+    await vi.advanceTimersByTimeAsync(PONG_TIMEOUT_MS * 2);
+    expect(last().closedWith).toBeNull();
+    expect(FakeSocket.instances).toHaveLength(1);
+    sock.disconnect();
+  });
+
+  it("offline pauses reconnecting without using the attempt budget; online reconnects at once", async () => {
+    const requestTicket = vi.fn(async (resume: string | null) => ticket(resume ? 2 : 1));
+    const { sock, statuses, fatal } = setup(requestTicket);
+    sock.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = last();
+    first.serverOpen();
+    sock.setOffline(true);
+    expect(first.closedWith).toBe(4000);
+    expect(statuses.at(-1)).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(10 * 60_000); // ten minutes offline
+    expect(requestTicket).toHaveBeenCalledTimes(1);
+    expect(fatal).toEqual([]);
+    sock.setOffline(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestTicket).toHaveBeenCalledTimes(2);
+    expect(FakeSocket.instances).toHaveLength(2);
+    last().serverOpen();
+    expect(statuses.at(-1)).toBe("open");
+    sock.disconnect();
+  });
+
+  it("going online during a backoff wait reconnects now; a stale attempt never opens a second socket", async () => {
+    let fail = true;
+    let release!: () => void;
+    const requestTicket = vi.fn(async (resume: string | null) => {
+      if (fail) throw new Error("network");
+      await new Promise<void>((r) => (release = r));
+      return ticket(resume ? 2 : 1);
+    });
+    const { sock } = setup(requestTicket);
+    sock.connect();
+    await vi.advanceTimersByTimeAsync(0); // first attempt fails -> backoff timer
+    expect(requestTicket).toHaveBeenCalledTimes(1);
+    fail = false;
+    sock.setOffline(true);
+    sock.setOffline(false); // reconnect now instead of waiting for the backoff
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestTicket).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000); // the cancelled backoff timer must not start another attempt
+    expect(requestTicket).toHaveBeenCalledTimes(2);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeSocket.instances).toHaveLength(1);
+    sock.disconnect();
+  });
+
+  it("disconnect while a ticket request is in flight never opens a socket", async () => {
+    let release!: () => void;
+    const requestTicket = vi.fn(async () => {
+      await new Promise<void>((r) => (release = r));
+      return ticket(1);
+    });
+    const { sock } = setup(requestTicket);
+    sock.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    sock.disconnect();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeSocket.instances).toHaveLength(0);
   });
 });

@@ -11,6 +11,11 @@ import { DEFAULT_SCHEDULE, planChunk, type ScheduleOptions } from "./timing";
 /** Seconds of audio allowed in the schedule; anything beyond is dropped (bounded memory if the server floods). */
 export const MAX_QUEUED_SEC = 30;
 const DUCK_GAIN = 0.15;
+/**
+ * After tts.end, the drained callback fires at the latest this long after the scheduled audio should have finished,
+ * even if a source's `onended` never fires (a suspended or interrupted AudioContext), so listening always resumes.
+ */
+export const DRAIN_GRACE_MS = 750;
 
 export class PcmPlayer {
   private gain: GainNode | null = null;
@@ -23,6 +28,7 @@ export class PcmPlayer {
   private accepting = false;
   private ended = false;
   private onDrained: (() => void) | null = null;
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly ctx: AudioContext,
@@ -85,10 +91,27 @@ export class PcmPlayer {
     this.ended = true;
     this.onDrained = onDrained;
     this.checkDrained();
+    if (this.onDrained) {
+      const remainingMs = Math.max(0, this.nextStart - this.ctx.currentTime) * 1000;
+      this.clearDrainTimer();
+      this.drainTimer = setTimeout(() => {
+        this.drainTimer = null;
+        if (!this.onDrained) return;
+        const cb = this.onDrained;
+        this.stop(); // whatever is still "queued" is stale by now
+        cb();
+      }, remainingMs + DRAIN_GRACE_MS);
+    }
+  }
+
+  private clearDrainTimer(): void {
+    if (this.drainTimer) clearTimeout(this.drainTimer);
+    this.drainTimer = null;
   }
 
   private checkDrained(): void {
     if (this.ended && this.sources.size === 0 && this.onDrained) {
+      this.clearDrainTimer();
       const cb = this.onDrained;
       this.onDrained = null;
       this.ended = false;
@@ -98,6 +121,7 @@ export class PcmPlayer {
 
   /** tts.stop / barge-in: silence now and drop everything queued. */
   stop(): void {
+    this.clearDrainTimer();
     this.accepting = false;
     this.ended = false;
     this.onDrained = null;

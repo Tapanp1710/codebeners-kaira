@@ -164,4 +164,20 @@ export type AgentContextValue = {
    * gesture, so the UI should offer "Resume live session" (which calls enable()). Optional: additive in 1.2.x.
    */
   resumeAvailable?: boolean;
+  /**
+   * Live voice is active in another tab of this browser (only one tab may hold the microphone session). This tab
+   * keeps typed input; enable() reports error code "live_elsewhere" until the other tab turns live voice off or
+   * closes. Optional: additive in 1.2.x.
+   */
+  liveElsewhere?: boolean;
+};
+
+/**
+ * 0..1 smoothed microphone and playback levels, updated ~20x/s while live. Read them with useAgentLevels() (a
+ * separate context, so only the component that animates them re-renders), not from AgentContextValue.
+ * Additive in 1.2.x.
+ */
+export type AgentLevels = {
+  mic: number;
+  output: number;
 };

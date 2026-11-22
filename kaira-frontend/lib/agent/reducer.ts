@@ -35,6 +35,7 @@ export type LocalEvent =
   | { type: "local.voice_configured"; value: boolean }
   | { type: "local.error"; error: AgentError | null }
   | { type: "local.resume_available"; value: boolean }
+  | { type: "local.live_elsewhere"; value: boolean }
   | { type: "local.levels"; mic: number; output: number };
 
 export type AgentEvent = ServerEvent | LocalEvent;
@@ -65,11 +66,15 @@ export type AgentEngineState = {
   error: AgentError | null;
   voiceConfigured: boolean | null;
   resumeAvailable: boolean;
+  /** Another tab of this browser holds the live microphone session (only one tab may). */
+  liveElsewhere: boolean;
   micLevel: number;
   outputLevel: number;
 };
 
 export const MAX_TRANSCRIPT = 200;
+/** Error code shown when enable() is refused because another tab holds the live session. */
+export const LIVE_ELSEWHERE_CODE = "live_elsewhere";
 export const MAX_ACTIVITY = 50;
 
 export const initialAgentState: AgentEngineState = {
@@ -93,6 +98,7 @@ export const initialAgentState: AgentEngineState = {
   error: null,
   voiceConfigured: null,
   resumeAvailable: false,
+  liveElsewhere: false,
   micLevel: 0,
   outputLevel: 0,
 };
@@ -384,6 +390,12 @@ export function reduceAgentEvent(state: AgentEngineState, event: AgentEvent): Ag
       return { ...state, error: event.error };
     case "local.resume_available":
       return { ...state, resumeAvailable: event.value };
+    case "local.live_elsewhere": {
+      if (event.value === state.liveElsewhere) return state;
+      // The other tab let go: the "active in another tab" notice no longer applies.
+      const error = !event.value && state.error?.code === LIVE_ELSEWHERE_CODE ? null : state.error;
+      return { ...state, liveElsewhere: event.value, error };
+    }
     case "local.levels":
       return state.micLevel === event.mic && state.outputLevel === event.output
         ? state
