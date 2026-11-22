@@ -33,6 +33,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.db.dependencies import AuthContext
 from app.models import AgentMessage, AgentSession, AgentToolExecution, Business, User
+from app.services.agent import dates as dateres
 from app.services.agent import tools as toolset
 from app.utils.dates import business_today
 
@@ -73,7 +74,11 @@ Rules:
 6. A payment AND a promise for the rest in one statement -> record_payment_and_promise.
    "X did not pay" -> record_missed_promise (never a payment). "Mark INV-.. as paid" -> invoice_status first; an
    invoice is paid only through recorded payments. "Actually it was 6,000, not 5,000" -> correct_payment_amount.
-7. Convert relative dates to YYYY-MM-DD from today. "next Monday" = the first Monday after today.
+7. Dates: {dateres.cheat_sheet(today)}. Pass dates as YYYY-MM-DD AND put the user's own date words in
+   evidence under the same field name (e.g. evidence.expected_payment_date = "next Monday"); the server resolves
+   those words itself and asks the user when they disagree with your date. Hindi "कल" means yesterday or
+   tomorrow and "परसों" two days before or after: use the verb tense, and ask if it is unclear. When you say a
+   date, say exactly the date in the tool result.
 8. If the latest utterance is not addressed to you - background conversation, TV, a stray fragment with no
    business question or instruction - reply with exactly {IGNORE} and call no tool.
 9. Your reply is spoken aloud: 1-3 short sentences, no lists, no markdown, no ids. Say amounts like ₹12,500.
@@ -135,6 +140,10 @@ def _brief(result: dict[str, Any]) -> dict[str, Any]:
             "invoice_outstanding_after",
             "total_received",
             "difference_recorded",
+            "stored",
+            "dates",
+            "due_date",
+            "expected_date",
         ):
             keep[k] = v
     for r in result.get("results", []) or []:
@@ -172,12 +181,37 @@ def verify_reply(reply: str, allowed_text: str) -> bool:
     return True
 
 
+def verify_reply_dates(reply: str, allowed_text: str, user_words: str, today) -> bool:
+    """True when every explicit date in the reply (ISO, '25 November', '25th November 2026', Hindi/Telugu month
+    names) is a date from the tool results / conversation, a date the user's own words resolve to, or today."""
+    if not dateres.reply_dates(reply):
+        return True
+    allowed = dateres.iso_dates_in(allowed_text) | {today}
+    for prefer in (dateres.PAST, dateres.FUTURE):
+        allowed |= {m.date for m in dateres.find_dates(user_words, today, prefer=prefer) if m.date}
+    return not dateres.unsupported_reply_dates(reply, allowed)
+
+
 def _fallback_reply(tool_runs: list[dict[str, Any]], language: str) -> str:
     parts = []
     for r in tool_runs:
         res = r["result"]
-        if res.get("status") == "completed" and res.get("summary"):
-            parts.append(str(res["summary"]))
+        status = res.get("status")
+        if status == "completed" and res.get("summary"):
+            parts.append(str(res["summary"]).rstrip(".") + ".")
+        elif status == "needs_confirmation" and res.get("summary"):
+            # Spoken read-back built from the stored proposal (never the model-directed instruction text).
+            notes = " ".join(
+                str(d["message"])
+                for d in res.get("dates") or []
+                if isinstance(d, dict) and d.get("decision") == "confirm" and d.get("message")
+            )
+            parts.append(
+                (notes + " " if notes else "")
+                + f"Nothing is recorded yet: {res['summary']}. Shall I go ahead?"
+            )
+        elif status == "needs_owner_approval" and res.get("summary"):
+            parts.append(f"{res['summary']}: waiting for the owner's approval.")
         elif res.get("message"):
             parts.append(str(res["message"]))
     return " ".join(parts) or UNVERIFIED.get(language, UNVERIFIED["en-IN"])
@@ -579,6 +613,9 @@ def run_turn(
         reply = NOTHING_RECORDED.get(language, NOTHING_RECORDED["en-IN"])
     if not ignored and not verify_reply(reply, allowed_text):
         logger.warning("agent reply contained unverified figures; replaced with tool summaries")
+        reply = _fallback_reply(tool_runs, language)
+    if not ignored and not verify_reply_dates(reply, allowed_text, transcript_window, today):
+        logger.warning("agent reply contained a date that no tool result or user word supports; replaced")
         reply = _fallback_reply(tool_runs, language)
     if not ignored and not reply:
         reply = _fallback_reply(tool_runs, language)
