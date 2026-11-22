@@ -15,6 +15,10 @@ TTS  wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v4-flash&send_completion
      recv  {"type": "audio", "data": {"audio": "<base64>", "content_type"}}, {"type": "event", "data":
            {"event_type": "final"}}, {"type": "error", "data": {"message", "code"}}
      There is no cancel message: barge-in closes the socket and the next reply opens a new one.
+STT close codes: 1003 key/rate limit/quota (do not retry), 1008 inactivity (no audio or ping for 60 s; reconnect),
+     1011 server error (retry with backoff), 4000 invalid parameter or account not enabled (do not retry).
+     Fatal error codes: invalid_request, invalid_model, invalid_subscription_key, inactivity_timeout. chunk_too_large
+     is not fatal. `session.end.audio_duration_s` is the billed audio; it arrives only after a graceful `end`.
 Auth: the `api-subscription-key` header, sent from this server only. The key never reaches the browser or logs.
 """
 
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -30,13 +35,39 @@ from typing import Any
 from urllib.parse import urlencode
 
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed, InvalidStatus
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from app.core.config import Settings
 from app.core.exceptions import ProviderNotConfiguredError
 
 logger = logging.getLogger(__name__)
 FRAME_BYTES = 3200  # 100 ms of 16 kHz mono linear16; Sarvam caps a frame at 500 ms on stream_type=fast
+TTS_IDLE_TIMEOUT_SECONDS = 20.0  # no audio/event from Sarvam TTS for this long ends the reply with an error
+
+# What the live session does after an STT stream ends (see classify_stt_end).
+STT_STOP = "stop"  # configuration, key, quota: reconnecting cannot help
+STT_RECONNECT_NOW = "reconnect_now"  # idle timeout / normal close: reconnect without counting a failure
+STT_RECONNECT_BACKOFF = "reconnect_backoff"  # server error or network drop: reconnect with backoff
+_STT_STOP_CODES = {
+    "invalid_subscription_key",
+    "invalid_request",
+    "invalid_model",
+    "closed_1003",
+    "closed_4000",
+}
+_STT_IDLE_CODES = {"inactivity_timeout", "closed_1008"}
+
+
+def classify_stt_end(error: dict[str, Any] | None) -> str:
+    """Decide how to recover from the end of one STT stream. `error` is the last fatal error event, if any."""
+    if not error:
+        return STT_RECONNECT_NOW
+    code = str(error.get("code") or "")
+    if code in _STT_STOP_CODES or code.startswith("closed_4"):
+        return STT_STOP
+    if code in _STT_IDLE_CODES:
+        return STT_RECONNECT_NOW
+    return STT_RECONNECT_BACKOFF
 
 
 class RealtimeProviderError(Exception):
@@ -104,6 +135,8 @@ class SttStream:
         self.ws: ClientConnection | None = None
         self.billed_audio_seconds: float = 0.0
         self.sent_bytes = 0
+        self.session_ended = False  # session.end (billed audio) was received for this connection
+        self.last_send_at = 0.0  # loop time of the last audio frame or ping (Sarvam closes after 60 s idle)
 
     def url(self) -> str:
         params: dict[str, Any] = {
@@ -129,8 +162,9 @@ class SttStream:
             self.ws = await connect(
                 self.url(), additional_headers={"api-subscription-key": key}, open_timeout=10, max_size=2**22
             )
-        except (InvalidStatus, OSError, TimeoutError) as exc:
+        except (InvalidHandshake, OSError, TimeoutError) as exc:
             raise _handshake_error(exc) from None
+        self.last_send_at = asyncio.get_running_loop().time()
 
     async def send_pcm(self, pcm: bytes) -> None:
         if self.ws is None:
@@ -141,10 +175,23 @@ class SttStream:
                 json.dumps({"event": "audio_input", "audio": base64.b64encode(chunk).decode()})
             )
             self.sent_bytes += len(chunk)
+            self.last_send_at = asyncio.get_running_loop().time()
 
     async def ping(self) -> None:
         if self.ws is not None:
             await self.ws.send(json.dumps({"event": "ping"}))
+            self.last_send_at = asyncio.get_running_loop().time()
+
+    def idle_seconds(self) -> float:
+        return asyncio.get_running_loop().time() - self.last_send_at
+
+    def _session_end(self, msg: dict[str, Any]) -> None:
+        if not self.session_ended:
+            self.session_ended = True
+            try:
+                self.billed_audio_seconds += max(0.0, float(msg.get("audio_duration_s") or 0))
+            except (TypeError, ValueError):
+                pass
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         assert self.ws is not None
@@ -152,10 +199,12 @@ class SttStream:
             async for raw in self.ws:
                 try:
                     msg = json.loads(raw)
-                except ValueError:
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(msg, dict):
                     continue
                 if msg.get("event") == "session.end":
-                    self.billed_audio_seconds += float(msg.get("audio_duration_s") or 0)
+                    self._session_end(msg)
                 if msg.get("event") == "error":
                     yield msg
                     if msg.get("is_fatal"):
@@ -163,18 +212,23 @@ class SttStream:
                     continue
                 yield msg
         except ConnectionClosed as exc:
-            code = exc.rcvd.code if exc.rcvd else None
-            if code not in (1000, None):
+            code = exc.rcvd.code if exc.rcvd else 1006  # no close frame: network drop
+            if code != 1000:
                 yield {
                     "event": "error",
                     "code": f"closed_{code}",
                     "is_fatal": True,
-                    "message": exc.rcvd.reason if exc.rcvd else "",
+                    "message": (exc.rcvd.reason if exc.rcvd else "")[:200],
                 }
 
     async def close(self) -> None:
         """Graceful end so Sarvam reports session.end (billed audio) before the socket closes."""
         if self.ws is None:
+            return
+        if self.session_ended:  # the server already ended this session
+            ws, self.ws = self.ws, None
+            with contextlib.suppress(ConnectionClosed, RuntimeError, OSError):
+                await ws.close()
             return
         try:
             await self.ws.send(json.dumps({"event": "end"}))
@@ -189,16 +243,14 @@ class SttStream:
                     msg = json.loads(raw)
                 except (TypeError, ValueError):
                     continue
-                if msg.get("event") == "session.end":
-                    self.billed_audio_seconds += float(msg.get("audio_duration_s") or 0)
+                if isinstance(msg, dict) and msg.get("event") == "session.end":
+                    self._session_end(msg)
                     break
-        except (ConnectionClosed, TimeoutError, RuntimeError):
+        except (ConnectionClosed, TimeoutError, RuntimeError, OSError):
             pass
-        try:
-            await self.ws.close()
-        except ConnectionClosed:
-            pass
-        self.ws = None
+        ws, self.ws = self.ws, None
+        with contextlib.suppress(ConnectionClosed, RuntimeError, OSError):
+            await ws.close()
 
     @property
     def sent_audio_seconds(self) -> float:
@@ -225,8 +277,16 @@ class TtsStream:
                 open_timeout=10,
                 max_size=2**24,
             )
-        except (InvalidStatus, OSError, TimeoutError) as exc:
+        except (InvalidHandshake, OSError, TimeoutError) as exc:
             raise _handshake_error(exc) from None
+        try:
+            await self._send_config()
+        except ConnectionClosed:
+            await self.close()
+            raise RealtimeProviderError("PROVIDER_UNAVAILABLE", "Sarvam closed the speech socket.") from None
+
+    async def _send_config(self) -> None:
+        assert self.ws is not None
         await self.ws.send(
             json.dumps(
                 {
@@ -255,15 +315,30 @@ class TtsStream:
         if self.ws is not None:
             await self.ws.send(json.dumps({"type": "flush"}))
 
-    async def audio(self) -> AsyncIterator[bytes]:
-        """Yields raw PCM (linear16) until the completion event."""
+    async def audio(self, idle_timeout: float = TTS_IDLE_TIMEOUT_SECONDS) -> AsyncIterator[bytes]:
+        """Yields raw PCM (linear16) until the completion event. A silent provider ends it with TTS_TIMEOUT."""
         assert self.ws is not None
         try:
-            async for raw in self.ws:
-                msg = json.loads(raw)
+            while True:
+                try:
+                    raw = await asyncio.wait_for(self.ws.recv(), timeout=idle_timeout)
+                except TimeoutError:
+                    raise RealtimeProviderError("TTS_TIMEOUT", "Sarvam speech output stalled.") from None
+                try:
+                    msg = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
                 kind = msg.get("type")
                 if kind == "audio":
-                    yield base64.b64decode(msg["data"]["audio"])
+                    data = msg.get("data") or {}
+                    try:
+                        pcm = base64.b64decode(data.get("audio") or "")
+                    except ValueError:
+                        continue
+                    if pcm:
+                        yield pcm
                 elif kind == "event" and (msg.get("data") or {}).get("event_type") == "final":
                     return
                 elif kind == "error":
@@ -275,9 +350,7 @@ class TtsStream:
             return
 
     async def close(self) -> None:
-        if self.ws is not None:
-            try:
-                await self.ws.close()
-            except ConnectionClosed:
-                pass
-            self.ws = None
+        ws, self.ws = self.ws, None
+        if ws is not None:
+            with contextlib.suppress(ConnectionClosed, RuntimeError, OSError):
+                await ws.close()
