@@ -7,15 +7,17 @@ brand-new application instance (new engine, new process state) over the same dat
 from __future__ import annotations
 
 import threading
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from app.db.dependencies import AuthContext
 from app.main import create_app
-from app.models import AuditLog, BillPayment, CashTransaction, Payment, PaymentAttempt
-from app.services import payment_attempt_service
+from app.models import AuditLog, BillPayment, Business, CashTransaction, Payment, PaymentAttempt, User
+from app.services import payment_attempt_service, payment_service
 from tests.conftest import Api, add_user, make_business, today
 
 
@@ -67,6 +69,36 @@ def device_b(app, db, owner):
 
 def register(api, body, status=201):
     return api.data(api.post("/payment-attempts", body), status)
+
+
+def record_direct_bypassing_attempts(app, owner, invoice_id, body, key):
+    """Commits a direct invoice payment the way the endpoint did before it checked payment attempts."""
+    session = app.state.session_factory()
+    try:
+        user = session.get(User, owner.user.id)
+        ctx = AuthContext(
+            user_id=user.id,
+            business_id=user.business_id,
+            role=user.role,
+            csrf="",
+            user=user,
+            business=session.get(Business, user.business_id),
+        )
+        payment_service.record_customer_payment(
+            session,
+            ctx,
+            invoice_id=invoice_id,
+            amount=Decimal(body["amount"]),
+            payment_date=date.fromisoformat(body["payment_date"]),
+            payment_method=body["payment_method"],
+            reference=body["reference"],
+            notes=body["notes"],
+            idempotency_key=key,
+            attempt_guard=False,
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 def execute(api, attempt_id, status=200):
@@ -354,14 +386,12 @@ def test_cancellation_is_refused_once_a_payment_exists(owner, db, invoice):
     assert r.status_code == 409 and r.json()["error"]["code"] == "PAYMENT_ATTEMPT_NOT_PENDING"
 
 
-def test_cancellation_reconciles_a_payment_recorded_under_the_key(owner, db, invoice):
+def test_cancellation_reconciles_a_payment_recorded_under_the_key(app, owner, db, invoice):
     body = attempt_body("invoice", invoice["id"], idempotency_key="shared-key-1")
     a = register(owner, body)
-    direct = {k: v for k, v in body.items() if k not in ("resource_type", "resource_id", "idempotency_key")}
-    # The same key was also used on the direct endpoint (e.g. an older client) and that payment committed.
-    owner.data(
-        owner.post(f"/invoices/{invoice['id']}/payments", direct, {"Idempotency-Key": "shared-key-1"}), 201
-    )
+    # The same key was also used on the direct endpoint and that payment committed, before the direct path
+    # settled attempts itself (it now links the attempt at once): fabricated with attempt_guard=False.
+    record_direct_bypassing_attempts(app, owner, invoice["id"], body, "shared-key-1")
     r = owner.post(f"/payment-attempts/{a['id']}/cancel")
     assert r.status_code == 409 and r.json()["error"]["code"] == "PAYMENT_ALREADY_RECORDED"
     assert owner.data(owner.get(f"/payment-attempts/{a['id']}"))["status"] == "succeeded"

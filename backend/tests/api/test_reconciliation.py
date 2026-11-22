@@ -3,7 +3,8 @@
 A "crash" is a session that does work and is rolled back or closed before COMMIT; a "crash between the
 payment commit and the attempt update" is a payment committed under the attempt's key while the attempt row
 is left pending (what a lost response or a dead process would leave behind if the two were not atomic, and
-what a direct payment reusing the key does leave behind). "Restart" is a fresh OS process running the CLI.
+what a direct payment reusing the key left behind before direct payments settled the attempt themselves; it is
+fabricated with attempt_guard=False). "Restart" is a fresh OS process running the CLI.
 """
 
 from __future__ import annotations
@@ -116,7 +117,10 @@ def crash_during_execute(app, owner, attempt_id):
 
 
 def commit_payment_under_key(app, owner, attempt_id):
-    """The payment for the attempt's exact request commits under its key; the attempt row is not updated."""
+    """The payment for the attempt's exact request commits under its key; the attempt row is not updated.
+
+    attempt_guard=False reproduces data written before the direct path settled attempts itself (a current
+    direct payment under the key links the attempt in the same transaction)."""
     session = app.state.session_factory()
     try:
         a = session.get(PaymentAttempt, attempt_id)
@@ -127,6 +131,7 @@ def commit_payment_under_key(app, owner, attempt_id):
             payment_method=p["payment_method"],
             reference=p["reference"],
             idempotency_key=a.idempotency_key,
+            attempt_guard=False,
         )
         ctx = ctx_for(session, owner.user.id)
         if a.resource_type == "invoice":
@@ -291,15 +296,28 @@ def test_expired_lease_alone_is_not_proof_when_a_payment_exists(app, owner, db, 
 
 def test_key_bound_to_a_different_payment_stays_pending(app, owner, db, invoice):
     a = register(owner, attempt_body("invoice", invoice["id"], idempotency_key="shared-key-9"))
-    # An older client reused the key on the direct endpoint for a different amount.
-    owner.data(
-        owner.post(
-            f"/invoices/{invoice['id']}/payments",
-            {"amount": "300.00", "payment_method": "upi"},
-            {"Idempotency-Key": "shared-key-9"},
-        ),
-        201,
+    # Before the direct path checked attempts, an older client reused the key there for a different amount.
+    # The endpoint now refuses that (422 IDEMPOTENCY_KEY_REUSED); data written back then must still reconcile.
+    r = owner.post(
+        f"/invoices/{invoice['id']}/payments",
+        {"amount": "300.00", "payment_method": "upi"},
+        {"Idempotency-Key": "shared-key-9"},
     )
+    assert r.status_code == 422 and r.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+    session = app.state.session_factory()
+    try:
+        payment_service.record_customer_payment(
+            session,
+            ctx_for(session, owner.user.id),
+            invoice_id=invoice["id"],
+            amount=Decimal("300.00"),
+            payment_method="upi",
+            idempotency_key="shared-key-9",
+            attempt_guard=False,
+        )
+        session.commit()
+    finally:
+        session.close()
     backdate(app, a["id"])
     (item,) = reconcile(app).items
     assert (item.outcome, item.reason) == ("left_pending", "key_bound_to_different_payment")

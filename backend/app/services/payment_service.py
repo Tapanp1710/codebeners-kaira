@@ -47,6 +47,13 @@ def bill_payment_by_key(db: Session, business_id: uuid.UUID, key: str) -> BillPa
     )
 
 
+def _attempts():
+    # payment_attempt_service builds on this module; imported lazily to avoid an import cycle.
+    from app.services import payment_attempt_service
+
+    return payment_attempt_service
+
+
 def check_method(method: str) -> str:
     if method not in PAYMENT_METHODS:
         raise ValidationAppError(
@@ -68,12 +75,19 @@ def record_customer_payment(
     idempotency_key: str | None = None,
     source_action_id: uuid.UUID | None = None,
     expected_customer_id: uuid.UUID | None = None,
+    attempt_guard: bool = True,
 ) -> PaymentResult:
+    """attempt_guard=False only for payment_attempt_service.execute, which already holds the attempt and
+    drives its transition. Every other caller is checked against payment attempts (see guard_direct_payment)."""
     amount = q2(amount)
     if amount <= ZERO:
         raise ValidationAppError("Payment amount must be greater than zero.")
     check_method(payment_method)
 
+    # The attempt registered under this key (if any) is locked before the invoice: lock order attempt -> invoice.
+    own_attempt = (
+        _attempts().lock_for_direct_payment(db, actor.business_id, idempotency_key) if attempt_guard else None
+    )
     # Serialise concurrent payments against the same invoice.
     invoice = db.scalar(
         select(Invoice)
@@ -123,7 +137,21 @@ def record_customer_payment(
     if idempotency_key:
         existing = payment_by_key(db, actor.business_id, idempotency_key)
         if existing is not None:
-            return replay_or_conflict(existing)
+            result = replay_or_conflict(existing)
+            if attempt_guard:
+                _attempts().link_direct_payment(db, actor, own_attempt, existing)
+            return result
+
+    # Under the invoice lock, so no attempt can be registered, executed or cancelled for it meanwhile.
+    if attempt_guard:
+        _attempts().guard_direct_payment(
+            db,
+            business_id=actor.business_id,
+            resource_type="invoice",
+            resource_id=invoice.id,
+            attempt=own_attempt,
+            fingerprint=fp,
+        )
 
     if invoice.lifecycle_status == "void":
         raise BusinessRuleError("INVOICE_VOID", "Payments cannot be recorded on a void invoice.")
@@ -195,6 +223,8 @@ def record_customer_payment(
         after=after,
         source_action_id=source_action_id,
     )
+    if attempt_guard:
+        _attempts().link_direct_payment(db, actor, own_attempt, payment)
     return PaymentResult(payment, created=True)
 
 
@@ -256,11 +286,16 @@ def record_bill_payment(
     reference: str | None = None,
     idempotency_key: str | None = None,
     source_action_id: uuid.UUID | None = None,
+    attempt_guard: bool = True,
 ) -> tuple[BillPayment, bool]:
+    """attempt_guard: see record_customer_payment."""
     amount = q2(amount)
     if amount <= ZERO:
         raise ValidationAppError("Payment amount must be greater than zero.")
     check_method(payment_method)
+    own_attempt = (
+        _attempts().lock_for_direct_payment(db, actor.business_id, idempotency_key) if attempt_guard else None
+    )
     bill = db.scalar(
         select(Bill).where(Bill.id == bill_id, Bill.business_id == actor.business_id).with_for_update()
     )
@@ -300,7 +335,19 @@ def record_bill_payment(
     if idempotency_key:
         existing = bill_payment_by_key(db, actor.business_id, idempotency_key)
         if existing is not None:
-            return replay_or_conflict(existing)
+            result = replay_or_conflict(existing)
+            if attempt_guard:
+                _attempts().link_direct_payment(db, actor, own_attempt, existing)
+            return result
+    if attempt_guard:
+        _attempts().guard_direct_payment(
+            db,
+            business_id=actor.business_id,
+            resource_type="bill",
+            resource_id=bill.id,
+            attempt=own_attempt,
+            fingerprint=fp,
+        )
     today = business_today(actor.business.timezone)
     bal = ledger.bill_balances(db, actor.business_id, today, bill_ids=[bill.id])[0]
     if bal.outstanding <= ZERO:
@@ -358,6 +405,8 @@ def record_bill_payment(
         after=after,
         source_action_id=source_action_id,
     )
+    if attempt_guard:
+        _attempts().link_direct_payment(db, actor, own_attempt, bp)
     return bp, True
 
 
