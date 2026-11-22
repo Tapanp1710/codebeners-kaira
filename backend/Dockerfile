@@ -22,8 +22,9 @@ RUN chmod +x /entrypoint.sh \
 USER kaira
 
 EXPOSE 8000
-# WEB_CONCURRENCY: number of uvicorn workers (default 2).
-ENV WEB_CONCURRENCY=2
+# WEB_CONCURRENCY: number of uvicorn workers (default 1). Single-use live-agent WebSocket tickets are enforced
+# per process, so keep 1 unless the ticket store is made shared; the free-tier target is one 512 MB instance.
+ENV WEB_CONCURRENCY=1
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"

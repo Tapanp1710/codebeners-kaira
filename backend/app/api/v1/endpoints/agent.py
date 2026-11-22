@@ -34,7 +34,8 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 TICKET_TYPE = "agent_ws"
 TICKET_AUDIENCE = "kaira-agent-ws"
 # Single-use tickets: a jti is accepted once per process (each live socket asks for a fresh ticket). With several
-# workers a ticket could at most be used once per worker within its 60 s lifetime.
+# workers a ticket could at most be used once per worker within its 60 s lifetime, which is why the container
+# defaults to one worker (docker/entrypoint.sh). Tickets are also redacted from uvicorn's logs (core/logging.py).
 _used_tickets: dict[str, float] = {}
 
 
