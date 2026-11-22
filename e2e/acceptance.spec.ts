@@ -6,7 +6,7 @@
  */
 import { expect, test } from "@playwright/test";
 
-import { apiGet, login } from "./helpers";
+import { apiGet, askKaira, login, settleLatestWrite } from "./helpers";
 
 const DEMO = "Ramesh paid me 5,000 rupees today. He will clear the remaining amount next Monday.";
 // Exact money helpers: "1234.50" <-> integer paise as BigInt, so expected values never pass through floats.
@@ -51,31 +51,18 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   await expect(page.getByTestId("customer-stats")).toContainText(inr(ramesh0.outstanding));
   const remaining = money(cents(ramesh0.outstanding) - BigInt(500000));
 
-  // 4-5. Typed request (voice needs the Sarvam key) -> extraction shown in full
-  await page.getByTestId("assistant-launcher").click();
-  const panel = page.getByRole("dialog", { name: "KAIRA assistant" });
-  await panel.getByTestId("assistant-input").fill(DEMO);
-  await panel.getByTestId("assistant-submit").click();
-  const card = panel.getByTestId("proposal-card");
-  await expect(card).toHaveAttribute("data-status", "pending");
-  await expect(card.getByTestId("proposal-transcript")).toContainText(DEMO);
-  const ops = card.getByTestId("proposal-operation");
-  await expect(ops.nth(0).getByTestId("operation-intent")).toHaveText("Record customer payment");
-  await expect(ops.nth(0).getByTestId("resolution-customer")).toContainText("Ramesh Kumar");
-  await expect(ops.nth(0).getByTestId("resolution-invoice")).toContainText("INV-");
-  await expect(ops.nth(0)).toContainText("₹5,000.00");
-  await expect(ops.nth(1).getByTestId("operation-intent")).toHaveText("Record payment promise");
-  await expect(ops.nth(1).getByTestId("computed-remaining_amount")).toHaveText(inr(remaining));
-  await expect(ops.nth(1)).toContainText("Promised date");
-  await expect(card).toContainText("Confidence:");
-  await expect(card).toContainText("found in transcript");
+  // 4-6. Typed request to KAIRA on the agent home (the voice agent's typed path; live voice needs the Sarvam key).
+  // The server's autonomy policy either executes it at once (owner, every value evidenced) or stores a proposal
+  // that the owner approves on the Approvals page; settleLatestWrite handles both and fails on anything else.
+  const reply = await askKaira(page, DEMO);
+  expect(reply).toMatch(/5,000|5000/);
+  const writes = page.locator('[data-testid="activity-item"][data-kind="write"]');
+  await expect(writes.first()).toBeVisible();
+  await expect(page.getByTestId("transcript-entry").filter({ hasText: DEMO }).last()).toBeVisible();
   // Full-page screenshots are kept under test-results/ as visual evidence of the acceptance run.
-  await page.screenshot({ path: "test-results/acceptance-proposal.png", fullPage: true });
-
-  // 6. Owner approval
-  await card.getByRole("button", { name: /approve/i }).click();
-  await expect(card).toHaveAttribute("data-status", "executed");
-  await expect(card.getByTestId("proposal-result")).toContainText("Recorded payment of 5000.00");
+  await page.screenshot({ path: "test-results/acceptance-agent.png", fullPage: true });
+  const path = await settleLatestWrite(page, "Ramesh Kumar");
+  test.info().annotations.push({ type: "agent-path", description: path });
 
   // 7. Verify actual backend changes
   const ramesh1 = await apiGet<Customer>(page.request, `/customers/${customerId}`);
@@ -88,7 +75,7 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   const payment = payments.items.find((p) => p.source_action_id && p.amount === "5000.00");
   expect(payment).toBeTruthy();
   const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${payment!.source_action_id}`);
-  expect(audit.items.map((a) => a.action_type)).toEqual(expect.arrayContaining(["payment.recorded", "commitment.created", "action.approved"]));
+  expect(audit.items.map((a) => a.action_type)).toEqual(expect.arrayContaining(["payment.recorded", "commitment.created"]));
   const dash1 = await apiGet<Dashboard>(page.request, "/dashboard");
   // Dashboard totals move by exactly 5,000.00: cash up, receivables down.
   expect(dash1.cash.current_cash).toBe(money(cents(dash0.cash.current_cash) + BigInt(500000))); // cash inflow
@@ -98,7 +85,6 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   expect(rec.items.reduce((s, r) => s + cents(r.outstanding), BigInt(0))).toBe(cents(remaining));
 
   // 8. Dashboard refresh in the UI
-  await page.keyboard.press("Escape");
   await page.goto("/dashboard");
   await expect(page.getByTestId("dashboard-stats")).toContainText(inr(dash1.cash.current_cash));
   await expect(page.getByTestId("recent-payments")).toContainText("Ramesh Kumar");

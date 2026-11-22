@@ -70,7 +70,7 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   const fields = resultFields(item.result);
   const took = duration(item);
   return (
-    <li className="rounded-xl bg-white/60 p-3 ring-1 ring-line/80" data-testid="activity-item" data-state={item.state} data-phase={phase}>
+    <li className="rounded-xl bg-white/60 p-3 ring-1 ring-line/80" data-testid="activity-item" data-state={item.state} data-phase={phase} data-kind={item.kind} data-turn={item.turn_id}>
       <div className="flex flex-wrap items-center gap-2">
         <PhaseBadge phase={phase} />
         <p className="min-w-0 flex-1 text-sm font-semibold text-ink">{item.label}</p>

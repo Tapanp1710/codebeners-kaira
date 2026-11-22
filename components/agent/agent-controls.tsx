@@ -99,7 +99,7 @@ export function LiveToggle({
       className={cn(compact && "px-2.5 sm:px-3")}
     >
       {live ? <Power className="size-4" aria-hidden="true" /> : <Mic className="size-4" aria-hidden="true" />}
-      <span className={cn(compact && "hidden sm:inline")}>{live ? (compact ? "Live · mic on" : "End live session") : compact ? "Go live" : "Start live session"}</span>
+      <span className={cn(compact && "hidden sm:inline")}>{live ? (compact ? "End live" : "End live session") : compact ? "Start live" : "Start live session"}</span>
     </Button>
   );
 }

@@ -36,7 +36,7 @@ export function AgentDock() {
           <div className="min-w-0 flex-1">
             <p role="status" aria-live="polite" className="truncate text-sm font-semibold" data-testid="dock-status">
               {status.label}
-              {agent.live && !agent.muted && <span className="ml-2 hidden text-xs font-normal text-sage sm:inline">· microphone on</span>}
+              {agent.live && !agent.muted && <span className="ml-2 text-xs font-normal text-sage">· mic on</span>}
             </p>
             <p className={cn("truncate text-xs text-cream/70", !expanded && "hidden sm:block")} data-testid="dock-caption">
               {caption ? (
