@@ -78,3 +78,27 @@ Repository settings the owner may add (none are needed for CI to pass):
 - `DEPLOY_HOOK_URL` (secret, backend `deploy.yml`): the hosting provider's deploy hook. Deploy runs only manually, with a typed confirmation, and nothing has been deployed.
 - `E2E_BACKEND_ORIGIN` (variable), plus `E2E_EMAIL` and `E2E_PASSWORD` (secrets), for the frontend `e2e` job. They must point at a **disposable** backend, never production.
 - `SARVAM_API_KEY` stays out of CI. Live provider checks are a manual step.
+
+### Final audit (2026-11-22, branch head `2c78369`, re-run before this docs commit)
+
+Local runs (this machine, not CI):
+- Ruff check and format: clean (117 files). Migrations on a throwaway database: up, `alembic check` (no drift),
+  down to base, up to head `6462ead8dd6e`. The committed `docs/openapi.json` equals the spec the app generates
+  (1.1.0, 43 paths, 117 schemas).
+- pytest on PostgreSQL (`kaira_test`): 181 passed, 0 failed. The 53 payment-attempt, idempotency and fingerprint
+  tests are among them.
+- Docker image built from this commit, run against its own disposable database: health 200; ready reports database
+  ok, migrations current, `voice_provider: not_configured`, `extraction_provider: rules`. Runs as `kaira` (uid
+  10001). Typed extraction works without Sarvam (proposal, provider `rules`).
+- The frontend's full Playwright suite (18/18) ran against that container. Afterwards: 10 succeeded attempts (6
+  invoice, 4 bill), each linked to exactly one payment with its key; 0 duplicate keys; 0 pending attempts left.
+- Secret audit: no tokens or private keys in any revision. The only tracked env files are templates with empty
+  secrets. The local JWT secret and demo password occur in no revision. The only database password in history is
+  the documented development default, which production config rejects.
+
+GitHub (remote CI, separate from the above): the branch heads `2c78369` (run `44999075413`) and frontend `019f2c0`
+(run `44999080477`) both concluded **success**. The repository is **public**, and it holds only the two feature
+branches (no `main`).
+
+Still outstanding: live Sarvam verification (no `SARVAM_API_KEY`); optional repository settings for the e2e job and
+deployment (above); nothing is deployed.
