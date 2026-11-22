@@ -260,6 +260,7 @@ def _exec_tool(
     transcript: str,
     language: str,
     known_ids: set[str] | None = None,
+    current_text: str | None = None,
 ) -> dict[str, Any]:
     kind = toolset.REGISTRY[name].kind if name in toolset.REGISTRY else "read"
     started = time.perf_counter()
@@ -286,6 +287,7 @@ def _exec_tool(
             turn_id=turn_id,
             sarvam=sarvam,
             known_ids=set(known_ids or ()),
+            current_text=current_text,
         )
         execution = AgentToolExecution(
             business_id=business_id,
@@ -516,6 +518,8 @@ def _run_turn(
     for _step in range(settings.AGENT_MAX_TOOL_STEPS):
         if should_cancel():
             emit({"type": "turn.cancelled", "turn_id": turn_id})
+            if claim_state is not None:
+                claim_state["cancelled"] = True
             return TurnResult(turn_id, "", language, tool_runs=tool_runs, llm_calls=llm_calls)
         if time.perf_counter() > deadline:
             reply = "That took too long, so I stopped. Nothing else was changed."
@@ -542,6 +546,8 @@ def _run_turn(
         tool = toolset.REGISTRY.get(name)
         if tool is not None and tool.kind == "write" and should_cancel():
             emit({"type": "turn.cancelled", "turn_id": turn_id})
+            if claim_state is not None:
+                claim_state["cancelled"] = True
             return TurnResult(turn_id, "", language, tool_runs=tool_runs, llm_calls=llm_calls)
         emit(
             {
@@ -564,6 +570,7 @@ def _run_turn(
             transcript_window,
             language,
             known_ids,
+            text,
         )
         events = result.pop("_events", [])
         tool_runs.append({"tool": name, "arguments": args, "result": result})
@@ -712,17 +719,21 @@ def conversation(db: Session, business_id: UUID, user_id: UUID, limit: int = 50)
 
 
 def run_turn(*args: Any, **kwargs: Any) -> TurnResult:
-    """Run one turn. If it raises after claiming the turn (LLM/provider failure, crash) and no reply was stored,
-    the claim is released, so resending the same turn_id runs it again instead of waiting for a reply that will
-    never come. That is safe: every tool call that already ran replays from its execution record (no second
+    """Run one turn. If it raises or is cancelled (barge-in) after claiming the turn and no reply was stored, the
+    claim is released, so resending the same turn_id runs it again instead of waiting for a reply that will never
+    come. That is safe: every tool call that already ran replays from its execution record (no second
     payment)."""
-    claim_state: dict[str, bool] = {"claimed": False}
+    claim_state: dict[str, bool] = {"claimed": False, "cancelled": False}
+    factory = args[0] if args else kwargs["factory"]
     try:
-        return _run_turn(*args, claim_state=claim_state, **kwargs)
+        result = _run_turn(*args, claim_state=claim_state, **kwargs)
     except BaseException:
         if claim_state["claimed"]:
-            _release_claim(args[0] if args else kwargs["factory"], kwargs)
+            _release_claim(factory, kwargs)
         raise
+    if claim_state["claimed"] and claim_state["cancelled"]:
+        _release_claim(factory, kwargs)
+    return result
 
 
 def _release_claim(factory: sessionmaker[Session], kw: dict[str, Any]) -> None:
