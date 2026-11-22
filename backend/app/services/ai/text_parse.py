@@ -98,6 +98,21 @@ def find_date(text: str, today: date, *, prefer: str = "future") -> tuple[date, 
     return (best[1], best[2]) if best else None
 
 
+def iter_dates(text: str, today: date, *, prefer: str = "future") -> list[tuple[int, int, date, str, str]]:
+    """Every English date expression in the text as (start, end, date, verbatim fragment, pattern name).
+    Overlapping matches are all returned; callers keep the longest (agent/dates.py)."""
+    out: list[tuple[int, int, date, str, str]] = []
+    for name, rx in _COMPILED:
+        for m in rx.finditer(text):
+            d = _resolve(name, m, today, prefer)
+            if d is None:
+                continue
+            frag = m.group(0)
+            lead = len(frag) - len(frag.lstrip())
+            out.append((m.start() + lead, m.start() + len(frag.rstrip()), d, frag.strip(), name))
+    return out
+
+
 def _resolve(name: str, m: re.Match, today: date, prefer: str) -> date | None:
     try:
         if name == "iso":
