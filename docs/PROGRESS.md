@@ -102,3 +102,31 @@ branches (no `main`).
 
 Still outstanding: live Sarvam verification (no `SARVAM_API_KEY`); optional repository settings for the e2e job and
 deployment (above); nothing is deployed.
+
+## Sarvam provider validation (2026-11-22)
+
+**Status: contract-verified and mock-tested; NOT live-tested.** `SARVAM_API_KEY` is empty in the backend `.env`,
+so no real Sarvam call has been made. No transcript, extraction or audio below came from the provider.
+
+Checked against the official docs (fetched 2026-11-22):
+
+| Area | Docs | KAIRA | Result |
+|---|---|---|---|
+| STT | `POST https://api.sarvam.ai/speech-to-text`, multipart, `saaras:v4`, modes incl. `transcribe` (original language), ≤ 30 s, response `transcript`/`language_code`/`language_probability` | same; `transcribe` mode; `language_code` omitted for auto-detect | matches |
+| Extraction | `POST /v1/chat/completions`, `sarvam-105b`, `response_format: json_schema`, thinking on by default (`low`) | same; reply re-validated by strict Pydantic before any proposal | matches |
+| TTS | `POST /text-to-speech`; `bulbul:v4-flash` latest (te/hi/en supported), same contract as v3; speaker must belong to the model; always pass `speaker` | was `bulbul:v3` + `shubh` (valid, older) | switched to v4-flash with catalog-verified voices (`c6cc68f`) |
+| Auth | `api-subscription-key` header | same; key never logged or returned | matches |
+| Retries | retry 429/500/502/503 with backoff; never 400/402/403/422; a 429 `seat_budget_exhausted_error` needs a top-up | retried every 429 | fixed (`faaf6a1`) |
+
+Voices (each present in the v4-flash catalog; not yet auditioned): te `kavitha_te_conversation`, hi `aparna_hi_customer`,
+en `aparna_en_companion`. Startup now rejects a speaker that does not fit `SARVAM_TTS_MODEL`.
+
+Without a key: `/voice/transcribe` and `/voice/speak` return 503 `PROVIDER_NOT_CONFIGURED` naming `SARVAM_API_KEY`;
+`/ready` reports `voice_provider: not_configured`; typed requests use the deterministic `rules` extractor.
+
+Tests: 196 passed on PostgreSQL (15 new: retry policy, backoff timings, no retry on permanent errors, timeout
+wiring, explicit model/speaker, speaker/model mismatch).
+
+To run the live validation: put the key in `backend/.env` as `SARVAM_API_KEY=…` (never in the frontend, never
+committed), restart the backend, and confirm `/api/v1/ready` reports `voice_provider: configured`. Live STT evidence
+needs real human recordings of the te/hi/en phrases (≤ 30 s each); synthetic tones or TTS output do not count.
