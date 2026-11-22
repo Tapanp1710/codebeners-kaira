@@ -20,6 +20,7 @@ Auth: the `api-subscription-key` header, sent from this server only. The key nev
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -177,7 +178,21 @@ class SttStream:
             return
         try:
             await self.ws.send(json.dumps({"event": "end"}))
-        except ConnectionClosed:
+            # Read until session.end (server-authoritative billed audio) or a short timeout.
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                raw = await asyncio.wait_for(self.ws.recv(), timeout=remaining)
+                try:
+                    msg = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if msg.get("event") == "session.end":
+                    self.billed_audio_seconds += float(msg.get("audio_duration_s") or 0)
+                    break
+        except (ConnectionClosed, TimeoutError, RuntimeError):
             pass
         try:
             await self.ws.close()

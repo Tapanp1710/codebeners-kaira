@@ -451,6 +451,14 @@ def run_turn(
             )
             messages.append({"role": "assistant", "content": content})
             allowed_text += " " + content
+    # The reply language follows the latest utterance, not the earlier conversation (language switching).
+    messages.append(
+        {
+            "role": "system",
+            "content": f"The user's latest message is in {LANG_NAMES.get(language, 'English')}. Reply in "
+            f"{LANG_NAMES.get(language, 'English')} only. Dates must be exactly as in tool results.",
+        }
+    )
     messages.append({"role": "user", "content": text})
     transcript_window = "\n".join([*recent_user_words[-4:], text])
     known_ids = set(UUID_RE.findall(allowed_text))
