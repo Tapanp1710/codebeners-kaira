@@ -1,13 +1,16 @@
 """Sarvam AI REST adapter: Saaras speech-to-text, Bulbul text-to-speech, chat completions.
 
-Verified against https://docs.sarvam.ai (2026-11-21):
+Verified against https://docs.sarvam.ai (2026-11-22):
 - STT  POST {base}/speech-to-text      multipart: file, model, mode, language_code
        -> {request_id, transcript, language_code, language_probability, ...}; max 30 s audio.
 - TTS  POST {base}/text-to-speech      JSON: text (<=2500 chars), language_code, model, speaker,
-       pace (0.5-2.0), speech_sample_rate, output_audio_codec -> {request_id, audios: [base64]}
+       pace (0.5-2.0), speech_sample_rate, output_audio_codec -> {request_id, audios: [base64]}.
+       bulbul:v3 and bulbul:v4-flash share this contract, but a speaker must belong to the model.
 - Chat POST {base}/v1/chat/completions OpenAI-shaped; response_format json_schema supported.
 Auth header: ``api-subscription-key``. The key is never logged.
-Retries (exponential backoff) only on 429/503/timeouts - these calls never write business data.
+Retries (exponential backoff) on 429/5xx and transport errors/timeouts - these calls never write
+business data. Never retried: 400/402/403/422 and a 429 whose code is seat_budget_exhausted_error
+(Sarvam's errors guide: those need a fix or a top-up, not another attempt).
 """
 
 from __future__ import annotations
@@ -24,9 +27,28 @@ from app.core.config import Settings
 from app.core.exceptions import ProviderError, ProviderNotConfiguredError, ServiceUnavailableError
 
 logger = logging.getLogger(__name__)
-# The module docstring lists retries only for 429/503/timeouts, but this set also retries
-# 500, 502 and 504 (transient server errors).
+# Sarvam documents 429, 500, 502 and 503 as retryable; 504 is a gateway timeout, treated like a
+# client-side timeout.
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+# A 429 with these error codes is not transient: a seat's spend budget is used up until someone
+# raises or tops it up, so retrying only burns time.
+NON_RETRYABLE_429_CODES = {"seat_budget_exhausted_error"}
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    err = body.get("error") if isinstance(body, dict) else None
+    code = err.get("code") if isinstance(err, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _is_retryable(response: httpx.Response) -> bool:
+    if response.status_code not in RETRY_STATUSES:
+        return False
+    return not (response.status_code == 429 and _error_code(response) in NON_RETRYABLE_429_CODES)
 
 
 @dataclass
@@ -93,7 +115,7 @@ class SarvamClient:
                             raise ProviderError(f"{feature}: provider returned invalid JSON.") from exc
                     # On the final attempt a retryable status falls through to _raise_for,
                     # so a 429 surfaces as PROVIDER_RATE_LIMITED.
-                    if response.status_code in RETRY_STATUSES and attempt + 1 < attempts:
+                    if _is_retryable(response) and attempt + 1 < attempts:
                         logger.warning(
                             "Sarvam %s returned %d (attempt %d)", feature, response.status_code, attempt + 1
                         )
@@ -128,14 +150,23 @@ class SarvamClient:
                 provider_message = err.get("message")
             if not provider_message and isinstance(body.get("detail"), str):
                 provider_message = body["detail"]
-        details = {"provider_status": status}
+        details: dict[str, Any] = {"provider_status": status}
         if isinstance(provider_message, str):
             details["provider_message"] = provider_message[:300]
+        provider_code = _error_code(response)
+        if provider_code:
+            details["provider_code"] = provider_code[:80]
         # Treated as a configuration problem (bad key), so the message points at SARVAM_API_KEY.
         if status in (401, 403):
             raise ProviderError(f"{feature}: Sarvam rejected the API key. Check SARVAM_API_KEY.", details)
         if status == 402:
             raise ProviderError(f"{feature}: the Sarvam account has insufficient credits.", details)
+        if status == 429 and provider_code in NON_RETRYABLE_429_CODES:
+            raise ProviderError(
+                f"{feature}: the Sarvam spend budget is used up. Raise or top up the budget; retrying will "
+                "not help.",
+                details,
+            )
         if status == 429:
             raise ServiceUnavailableError(
                 f"{feature}: provider rate limit reached. Try again shortly.",
