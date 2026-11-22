@@ -159,4 +159,9 @@ export type AgentContextValue = {
   metrics: AgentMetrics;
   error: { code: string; message: string; fatal: boolean } | null;
   voiceConfigured: boolean | null; // null until known
+  /**
+   * The user had the live session on before a full page reload. The microphone is never re-opened without a user
+   * gesture, so the UI should offer "Resume live session" (which calls enable()). Optional: additive in 1.2.x.
+   */
+  resumeAvailable?: boolean;
 };
