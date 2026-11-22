@@ -30,11 +30,11 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 TICKET_TYPE = "agent_ws"
 
 
-class SessionStart(BaseModel):
+class AgentSessionStart(BaseModel):
     resume_session_id: uuid.UUID | None = None
 
 
-class SessionOut(BaseModel):
+class AgentSessionOut(BaseModel):
     session_id: uuid.UUID
     ticket: str
     ws_url: str
@@ -44,13 +44,13 @@ class SessionOut(BaseModel):
     tts_model: str
 
 
-class TurnIn(BaseModel):
+class AgentTurnIn(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
     turn_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
     language: str | None = Field(default=None, max_length=8)
 
 
-class TurnOut(BaseModel):
+class AgentTurnOut(BaseModel):
     turn_id: str
     reply: str
     language: str
@@ -60,8 +60,8 @@ class TurnOut(BaseModel):
     events: list[dict[str, Any]]
 
 
-@router.post("/session", response_model=Envelope[SessionOut], summary="Start or resume a live voice session")
-def start_session(body: SessionStart, request: Request, ctx: Auth, db: DbSession, settings: SettingsDep):
+@router.post("/session", response_model=Envelope[AgentSessionOut], summary="Start or resume a live voice session")
+def start_session(body: AgentSessionStart, request: Request, ctx: Auth, db: DbSession, settings: SettingsDep):
     request.app.state.rate_limiter.check(f"ai:{ctx.user_id}", settings.RATE_LIMIT_AI_PER_MINUTE)
     session = None
     if body.resume_session_id:
@@ -91,7 +91,7 @@ def start_session(body: SessionStart, request: Request, ctx: Auth, db: DbSession
         algorithm="HS256",
     )
     return ok(
-        SessionOut(
+        AgentSessionOut(
             session_id=session.id,
             ticket=ticket,
             ws_url=settings.AGENT_PUBLIC_WS_URL,
@@ -138,8 +138,8 @@ async def live(ws: WebSocket):
     await LiveSession(ws, ws.app.state, user_id=user_id, business_id=business_id, session_id=session_id).run()
 
 
-@router.post("/turn", response_model=Envelope[TurnOut], summary="One typed conversational turn")
-def turn(body: TurnIn, request: Request, ctx: Auth, settings: SettingsDep):
+@router.post("/turn", response_model=Envelope[AgentTurnOut], summary="One typed conversational turn")
+def turn(body: AgentTurnIn, request: Request, ctx: Auth, settings: SettingsDep):
     request.app.state.rate_limiter.check(f"ai:{ctx.user_id}", settings.RATE_LIMIT_AI_PER_MINUTE)
     events: list[dict[str, Any]] = []
     result = orchestrator.run_turn(
@@ -156,7 +156,7 @@ def turn(body: TurnIn, request: Request, ctx: Auth, settings: SettingsDep):
         emit=events.append,
     )
     return ok(
-        TurnOut(
+        AgentTurnOut(
             turn_id=result.turn_id,
             reply=result.reply,
             language=result.language,
