@@ -28,7 +28,7 @@ import {
 import { MicCapture, MicError, micSupportError, type MicFrame } from "./mic";
 import { PcmPlayer } from "./player";
 import { rmsToLevel, smoothLevel } from "./pcm";
-import { MIC_SAMPLE_RATE, type AgentLevels, type AgentSessionTicket, type ServerEvent } from "./protocol";
+import { MIC_SAMPLE_RATE, type AgentLevels, type AgentSessionTicket, type SendTextResult, type ServerEvent } from "./protocol";
 import {
   eventIntents,
   initialAgentState,
@@ -55,6 +55,10 @@ const LEVEL_INTERVAL_MS = 50;
 const STORAGE_LIVE = "kaira.agent.live";
 const STORAGE_SESSION = "kaira.agent.session";
 export const ZERO_LEVELS: AgentLevels = Object.freeze({ mic: 0, output: 0 });
+/** Shown on a typed turn that was still waiting for its answer when the user turned live voice off or left. */
+export const TURN_STOPPED_CODE = "turn_stopped";
+export const TURN_STOPPED_MESSAGE =
+  "Live voice was turned off before KAIRA answered your typed message. Send it again if you still need it.";
 export const LIVE_ELSEWHERE_MESSAGE =
   "Live voice is already on in another KAIRA tab. Turn it off there (or close that tab) to use it here. Typed input still works.";
 
@@ -215,10 +219,13 @@ export class AgentEngine {
     }
   }
 
-  /** Releases every device and connection (unmount). The live preference stays stored for a reload. */
+  /**
+   * Releases every device and connection (unmount). The live preference stays stored for a reload. Typed turns
+   * still waiting on the socket are not replayed (the user left): they are marked failed.
+   */
   detach(): void {
     this.enableSeq++;
-    this.teardown();
+    this.teardown("drop");
     if (this.state.live) this.dispatch({ type: "local.live", live: false });
     this.unwatchLock?.();
     this.unwatchLock = null;
@@ -263,7 +270,7 @@ export class AgentEngine {
     }
     if (!owned) {
       this.enableSeq++;
-      this.teardown();
+      this.teardown("drop");
       this.dispatch({ type: "local.live", live: false });
       this.dispatch({ type: "local.live_elsewhere", value: true });
       this.dispatch({ type: "local.error", error: { code: LIVE_ELSEWHERE_CODE, message: LIVE_ELSEWHERE_MESSAGE, fatal: false } });
@@ -324,9 +331,10 @@ export class AgentEngine {
     this.startLevels();
   };
 
+  /** Explicit "End live session": typed turns still waiting on the socket are marked failed, never replayed. */
   disable = (): void => {
     this.enableSeq++;
-    this.teardown();
+    this.teardown("drop");
     this.deps.storage()?.removeItem(STORAGE_LIVE);
     this.dispatch({ type: "local.live", live: false });
     this.dispatch({ type: "local.resume_available", value: false });
@@ -352,10 +360,14 @@ export class AgentEngine {
     this.dispatch({ type: "tts.stop", reason: "user" });
   };
 
-  /** Typed input. Over the open socket when live; otherwise POST /agent/turn. Errors end up in `error`. */
-  sendText = async (text: string): Promise<void> => {
+  /**
+   * Typed input. Over the open socket when live; otherwise POST /agent/turn. Never rejects: resolves ok:false (and
+   * sets `error`) when a REST turn fails; a socket turn resolves ok:true once sent, and a later refusal (e.g.
+   * RATE_LIMITED) is reported in `error`.
+   */
+  sendText = async (text: string): Promise<SendTextResult> => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed) return { ok: false, error: "Type a message first." };
     const turnId = newTurnId();
     this.dispatch({ type: "local.turn_pending", turn_id: turnId, text: trimmed, at: new Date().toISOString(), mode: "text" });
     if (this.socket?.isOpen && this.socket.send({ type: "text", text: trimmed, turn_id: turnId })) {
@@ -363,9 +375,9 @@ export class AgentEngine {
       // A silently dead socket would swallow the turn: ping now, so a lost connection is noticed within
       // PONG_TIMEOUT_MS and the turn is replayed over REST with the same turn_id.
       this.socket.probe();
-      return;
+      return { ok: true };
     }
-    await this.runRestTurn(turnId, trimmed);
+    return this.runRestTurn(turnId, trimmed);
   };
 
   // ------------------------------------------------------------------ internals
@@ -416,7 +428,7 @@ export class AgentEngine {
     }
   };
 
-  private async runRestTurn(turnId: string, text: string): Promise<void> {
+  private async runRestTurn(turnId: string, text: string): Promise<SendTextResult> {
     this.restTurns.add(turnId);
     try {
       const out = await this.deps.postTurn(text, turnId);
@@ -434,9 +446,11 @@ export class AgentEngine {
         this.dispatch({ type: "reply", turn_id: turnId, text: out.reply, language: out.language });
       }
       this.dispatch({ type: "local.turn_done", turn_id: turnId });
+      return { ok: true };
     } catch (error) {
       const { code, message } = errorMessage(error, "KAIRA could not answer that. Please try again.");
       this.dispatch({ type: "local.turn_failed", turn_id: turnId, code, message });
+      return { ok: false, error: message };
     } finally {
       this.restTurns.delete(turnId);
     }
@@ -477,6 +491,14 @@ export class AgentEngine {
       case "turn.cancelled":
       case "turn.failed":
         this.pendingTextTurns.delete(event.turn_id);
+        break;
+      case "error":
+        // A typed turn the server refused (RATE_LIMITED names its turn_id): it is over, never replay it unasked.
+        if (!event.fatal && event.turn_id && this.pendingTextTurns.has(event.turn_id)) {
+          this.pendingTextTurns.delete(event.turn_id);
+          this.dispatch({ type: "local.turn_failed", turn_id: event.turn_id, code: event.code, message: event.message });
+          return;
+        }
         break;
     }
     this.dispatch(event);
@@ -575,8 +597,12 @@ export class AgentEngine {
     this.dispatch({ type: "local.levels", mic: 0, output: 0 });
   }
 
-  /** Stops and releases mic, socket, playback and the AudioContext. Idempotent. */
-  private teardown(): void {
+  /**
+   * Stops and releases mic, socket, playback and the AudioContext. Idempotent. Typed turns still waiting on the
+   * socket are replayed over REST (same turn_id) when the session ended on its own ("replay": fatal error, lost
+   * microphone), or marked failed when the user turned live voice off or left ("drop").
+   */
+  private teardown(pending: "replay" | "drop" = "replay"): void {
     this.unsubscribeNetwork?.();
     this.unsubscribeNetwork = null;
     const socket = this.socket;
@@ -597,8 +623,11 @@ export class AgentEngine {
     this.bargeStartedAt = null;
     this.ducked = false;
     this.stopLevels();
-    const pending = [...this.pendingTextTurns];
+    const waiting = [...this.pendingTextTurns];
     this.pendingTextTurns.clear();
-    for (const [turnId, text] of pending) void this.runRestTurn(turnId, text);
+    for (const [turnId, text] of waiting) {
+      if (pending === "replay") void this.runRestTurn(turnId, text);
+      else this.dispatch({ type: "local.turn_failed", turn_id: turnId, code: TURN_STOPPED_CODE, message: TURN_STOPPED_MESSAGE });
+    }
   }
 }

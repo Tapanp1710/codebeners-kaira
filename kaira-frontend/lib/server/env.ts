@@ -32,7 +32,6 @@ export function backendOrigin(): string {
   return url.origin;
 }
 
-/** Default upstream timeout in ms: BACKEND_TIMEOUT_MS when it is a positive number, otherwise 30 s. */
 /**
  * Name of a header set by the reverse proxy in front of this server that carries the browser's address
  * (for example "x-real-ip", or "x-forwarded-for" from a platform proxy that appends to it). Unset means no
@@ -43,6 +42,10 @@ export function trustedClientIpHeader(): string | null {
   return raw && /^[a-z0-9-]+$/.test(raw) ? raw : null;
 }
 
+/**
+ * Default upstream timeout in ms: BACKEND_TIMEOUT_MS when it is a positive number, otherwise 30 s. Voice calls and
+ * typed agent turns get at least 90 s regardless (lib/server/proxy.ts upstreamTimeoutMs).
+ */
 export function backendTimeoutMs(): number {
   const value = Number(process.env.BACKEND_TIMEOUT_MS);
   return Number.isFinite(value) && value > 0 ? value : 30_000;

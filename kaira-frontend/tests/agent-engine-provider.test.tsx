@@ -4,12 +4,15 @@
  * liveElsewhere reaches useAgent(), and unmount releases the microphone, socket and tab lock.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { AgentTextForm } from "@/components/agent/agent-controls";
 import { AgentProvider, useAgent, useAgentLevels } from "@/components/agent/agent-provider";
 import { AgentEngine, type EngineDeps } from "@/lib/agent/engine";
+import { ApiError } from "@/lib/api/errors";
 import type { MicCapture } from "@/lib/agent/mic";
 
 import { FakeAudioContext, FakeMic, FakeNetwork, FakeSocket, FakeTabLock, ticket } from "./agent-engine-fakes";
@@ -24,7 +27,7 @@ let mic: FakeMic;
 let lock: FakeTabLock;
 let network: FakeNetwork;
 
-function makeEngine() {
+function makeEngine(overrides: Partial<EngineDeps> = {}) {
   mic = new FakeMic();
   lock = new FakeTabLock();
   network = new FakeNetwork();
@@ -40,6 +43,7 @@ function makeEngine() {
     origin: () => "http://localhost:3000",
     createTabLock: () => lock,
     network,
+    ...overrides,
   };
   return new AgentEngine(deps);
 }
@@ -127,6 +131,33 @@ describe("AgentProvider", () => {
     expect(screen.getByTestId("agent").textContent).toBe("off|elsewhere");
     act(() => lock.setElsewhere(false));
     expect(screen.getByTestId("agent").textContent).toBe("off|here");
+  });
+
+  it("a typed turn that fails keeps its text in the form and shows 'Not sent'; a success clears it", async () => {
+    const postTurn = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError(504, { code: "BACKEND_TIMEOUT", message: "The KAIRA server took too long to respond." }))
+      .mockImplementation(async (text: string, turnId: string) => ({
+        turn_id: turnId, reply: `echo ${text}`, language: "en-IN", ignored: false, replayed: false, duration_ms: 5, events: [],
+      }));
+    const engine = makeEngine({ postTurn });
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <AgentProvider engine={engine}>
+          <AgentTextForm />
+        </AgentProvider>
+      </QueryClientProvider>,
+    );
+    const input = screen.getByTestId("agent-text-input");
+    await userEvent.type(input, "Ramesh paid 5000");
+    await userEvent.click(screen.getByTestId("agent-text-submit"));
+    await waitFor(() => expect(screen.getByTestId("agent-text-error")).toHaveTextContent("Not sent: The KAIRA server took too long to respond."));
+    expect(input).toHaveValue("Ramesh paid 5000");
+    await userEvent.click(screen.getByTestId("agent-text-submit"));
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(screen.queryByTestId("agent-text-error")).toBeNull();
+    expect(postTurn).toHaveBeenCalledTimes(2);
   });
 
   it("useAgentLevels() outside the provider returns zeros", () => {

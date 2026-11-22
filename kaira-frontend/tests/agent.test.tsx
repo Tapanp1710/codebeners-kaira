@@ -3,7 +3,7 @@
  * activity feed and the app shell's single agent interface. useAgent() is mocked (vi.mock of the provider module),
  * so these tests pin the UI's behaviour against the contract in lib/agent/protocol.ts, not a voice engine.
  */
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
@@ -13,7 +13,7 @@ import { AgentHome } from "@/components/agent/agent-home";
 import { KairaOrb, LiveKairaOrb, ORB_STATUS } from "@/components/agent/kaira-orb";
 import { AppShell } from "@/components/layout/app-shell";
 import { Providers } from "@/components/providers";
-import type { ActivityItem, AgentContextValue, OrbState } from "@/lib/agent/protocol";
+import type { ActivityItem, AgentContextValue, OrbState, SendTextResult } from "@/lib/agent/protocol";
 
 import { envelope, ownerSession } from "./fixtures";
 import { pathOf, renderApp } from "./render";
@@ -59,7 +59,7 @@ function makeAgent(overrides: Partial<AgentContextValue> = {}): AgentContextValu
     muted: false,
     setMuted: vi.fn(),
     interrupt: vi.fn(),
-    sendText: vi.fn(async () => {}),
+    sendText: vi.fn(async () => ({ ok: true })),
     orb: "off",
     micLevel: 0,
     outputLevel: 0,
@@ -305,7 +305,7 @@ describe("AgentHome", () => {
   });
 
   it("sends typed text through sendText() and keeps it if sending fails", async () => {
-    const sendText = vi.fn(async () => {});
+    const sendText = vi.fn<(text: string) => Promise<SendTextResult>>(async () => ({ ok: true }));
     mocks.agent = makeAgent({ sendText });
     renderApp(<AgentHome />, { handler });
     const input = screen.getByTestId("agent-text-input");
@@ -320,6 +320,17 @@ describe("AgentHome", () => {
     await userEvent.click(screen.getByTestId("agent-text-submit"));
     expect(await screen.findByTestId("agent-text-error")).toHaveTextContent("Not sent: Live voice engine not installed in this build.");
     expect(input).toHaveValue("Ramesh paid 5000");
+    // The provider reports a failed turn by resolving ok:false (it never rejects): the text stays, the error shows.
+    sendText.mockResolvedValueOnce({ ok: false, error: "Too many requests. Wait a moment." });
+    await userEvent.click(screen.getByTestId("agent-text-submit"));
+    expect(sendText).toHaveBeenLastCalledWith("Ramesh paid 5000");
+    await waitFor(() => expect(screen.getByTestId("agent-text-error")).toHaveTextContent("Not sent: Too many requests. Wait a moment."));
+    expect(input).toHaveValue("Ramesh paid 5000");
+
+    // A later success clears both the error and the input.
+    await userEvent.click(screen.getByTestId("agent-text-submit"));
+    await waitFor(() => expect(input).toHaveValue(""));
+    expect(screen.queryByTestId("agent-text-error")).toBeNull();
   });
 });
 

@@ -31,9 +31,15 @@ export function apiUrl(path: string): string {
 const v1 = (path: string) => apiUrl(`${API_BASE}/api/v1${path}`);
 // Methods that require X-CSRF-Token on the backend.
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-// Browser-side timeouts: 30 s normally, 95 s for /voice/ (just above the proxy's 90 s voice timeout).
-const DEFAULT_TIMEOUT_MS = 30_000;
-const LONG_TIMEOUT_MS = 95_000;
+// Browser-side timeouts: 30 s normally, 95 s for /voice/ and POST /agent/turn (just above the proxy's 90 s for
+// both; an agent turn may run up to the backend's AGENT_TURN_TIMEOUT_SECONDS = 60 s plus tool latency).
+export const DEFAULT_TIMEOUT_MS = 30_000;
+export const LONG_TIMEOUT_MS = 95_000;
+
+/** The browser-side timeout for a request path (pathname, without the origin). */
+export function requestTimeoutMs(pathname: string): number {
+  return /\/voice\//.test(pathname) || /\/agent\/turn\/?$/.test(pathname) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+}
 
 // ------------------------------------------------------------------ session state (memory only)
 // Deliberately not persisted (no localStorage/cookie): a reload drops it and the server layout re-seeds it.
@@ -98,11 +104,10 @@ async function readEnvelopeCode(res: Response): Promise<string | null> {
 function prepare(req: Request): Request {
   const headers = new Headers(req.headers);
   if (UNSAFE.has(req.method) && csrfToken) headers.set("X-CSRF-Token", csrfToken);
-  const long = /\/voice\//.test(new URL(req.url, "http://x").pathname);
   return new Request(req, {
     headers,
     credentials: "same-origin",
-    signal: AbortSignal.timeout(long ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS),
+    signal: AbortSignal.timeout(requestTimeoutMs(new URL(req.url, "http://x").pathname)),
   });
 }
 
