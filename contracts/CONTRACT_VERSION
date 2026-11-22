@@ -1,7 +1,7 @@
 api_version=1.2.0
 backend_branch=feat/payment-integrity
-backend_commit=e16a578b8001cef1ed52be5a4d5e3c4fb8ce3eaf
-openapi_sha256=a18a04c9c0dfc2d73c5aa75135e38bcae1da767a018c7fdcb0d7f86d59eaf621
+backend_commit=5f5d80c5ca309fa7355148d512e996d3466ffe86
+openapi_sha256=79f09cf7f89482166584ec27ac17731100334f1380400da1e7f37d05c2b51856
 paths=47
 schemas=125
 imported_on=2026-11-22

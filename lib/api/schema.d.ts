@@ -823,6 +823,59 @@ export interface components {
             /** Operations */
             operations: components["schemas"]["Operation"][];
         };
+        /** AgentSessionOut */
+        AgentSessionOut: {
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Ticket */
+            ticket: string;
+            /** Ws Url */
+            ws_url: string;
+            /** Expires In */
+            expires_in: number;
+            /** Voice Configured */
+            voice_configured: boolean;
+            /** Stt Model */
+            stt_model: string;
+            /** Tts Model */
+            tts_model: string;
+        };
+        /** AgentSessionStart */
+        AgentSessionStart: {
+            /** Resume Session Id */
+            resume_session_id?: string | null;
+        };
+        /** AgentTurnIn */
+        AgentTurnIn: {
+            /** Text */
+            text: string;
+            /** Turn Id */
+            turn_id?: string | null;
+            /** Language */
+            language?: string | null;
+        };
+        /** AgentTurnOut */
+        AgentTurnOut: {
+            /** Turn Id */
+            turn_id: string;
+            /** Reply */
+            reply: string;
+            /** Language */
+            language: string;
+            /** Ignored */
+            ignored: boolean;
+            /** Replayed */
+            replayed: boolean;
+            /** Duration Ms */
+            duration_ms: number;
+            /** Events */
+            events: {
+                [key: string]: unknown;
+            }[];
+        };
         /** AnswerOut */
         AnswerOut: {
             /**
@@ -1406,6 +1459,26 @@ export interface components {
             /** Pending Action Count */
             pending_action_count: number;
         };
+        /** Envelope[AgentSessionOut] */
+        Envelope_AgentSessionOut_: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["AgentSessionOut"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
+        /** Envelope[AgentTurnOut] */
+        Envelope_AgentTurnOut_: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["AgentTurnOut"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
         /** Envelope[AnswerOut] */
         Envelope_AnswerOut_: {
             /**
@@ -1666,6 +1739,16 @@ export interface components {
             data?: components["schemas"]["ReminderOut"] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
+        /** Envelope[SessionOut] */
+        Envelope_SessionOut_: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["SessionOut"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
         /** Envelope[SimulationOut] */
         Envelope_SimulationOut_: {
             /**
@@ -1694,16 +1777,6 @@ export interface components {
              */
             success: boolean;
             data?: components["schemas"]["TranscriptionOut"] | null;
-            error?: components["schemas"]["ErrorDetail"] | null;
-        };
-        /** Envelope[TurnOut] */
-        Envelope_TurnOut_: {
-            /**
-             * Success
-             * @default true
-             */
-            success: boolean;
-            data?: components["schemas"]["TurnOut"] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
         /** Envelope[dict] */
@@ -2845,10 +2918,20 @@ export interface components {
              */
             candidates: components["schemas"]["Candidate"][];
         };
-        /** SessionStart */
-        SessionStart: {
-            /** Resume Session Id */
-            resume_session_id?: string | null;
+        /** SessionOut */
+        SessionOut: {
+            user: components["schemas"]["UserOut"];
+            business: components["schemas"]["BusinessOut"];
+            /**
+             * Csrf Token
+             * @description Send as X-CSRF-Token on POST/PATCH/PUT/DELETE.
+             */
+            csrf_token: string;
+            /**
+             * Access Token Expires At
+             * Format: date-time
+             */
+            access_token_expires_at: string;
         };
         /** ShortfallOut */
         ShortfallOut: {
@@ -3066,34 +3149,6 @@ export interface components {
             /** Request Id */
             request_id: string | null;
         };
-        /** TurnIn */
-        TurnIn: {
-            /** Text */
-            text: string;
-            /** Turn Id */
-            turn_id?: string | null;
-            /** Language */
-            language?: string | null;
-        };
-        /** TurnOut */
-        TurnOut: {
-            /** Turn Id */
-            turn_id: string;
-            /** Reply */
-            reply: string;
-            /** Language */
-            language: string;
-            /** Ignored */
-            ignored: boolean;
-            /** Replayed */
-            replayed: boolean;
-            /** Duration Ms */
-            duration_ms: number;
-            /** Events */
-            events: {
-                [key: string]: unknown;
-            }[];
-        };
         /** UpcomingBillOut */
         UpcomingBillOut: {
             /**
@@ -3166,61 +3221,6 @@ export interface components {
              * @default false
              */
             blocking: boolean;
-        };
-        /** SessionOut */
-        app__api__v1__endpoints__agent__SessionOut: {
-            /**
-             * Session Id
-             * Format: uuid
-             */
-            session_id: string;
-            /** Ticket */
-            ticket: string;
-            /** Ws Url */
-            ws_url: string;
-            /** Expires In */
-            expires_in: number;
-            /** Voice Configured */
-            voice_configured: boolean;
-            /** Stt Model */
-            stt_model: string;
-            /** Tts Model */
-            tts_model: string;
-        };
-        /** Envelope[SessionOut] */
-        app__schemas__common__Envelope_SessionOut___1: {
-            /**
-             * Success
-             * @default true
-             */
-            success: boolean;
-            data?: components["schemas"]["app__schemas__core__SessionOut"] | null;
-            error?: components["schemas"]["ErrorDetail"] | null;
-        };
-        /** Envelope[SessionOut] */
-        app__schemas__common__Envelope_SessionOut___2: {
-            /**
-             * Success
-             * @default true
-             */
-            success: boolean;
-            data?: components["schemas"]["app__api__v1__endpoints__agent__SessionOut"] | null;
-            error?: components["schemas"]["ErrorDetail"] | null;
-        };
-        /** SessionOut */
-        app__schemas__core__SessionOut: {
-            user: components["schemas"]["UserOut"];
-            business: components["schemas"]["BusinessOut"];
-            /**
-             * Csrf Token
-             * @description Send as X-CSRF-Token on POST/PATCH/PUT/DELETE.
-             */
-            csrf_token: string;
-            /**
-             * Access Token Expires At
-             * Format: date-time
-             */
-            access_token_expires_at: string;
         };
     };
     responses: never;
@@ -3330,7 +3330,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___1"];
+                    "application/json": components["schemas"]["Envelope_SessionOut_"];
                 };
             };
             /** @description Validation Error */
@@ -3359,7 +3359,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___1"];
+                    "application/json": components["schemas"]["Envelope_SessionOut_"];
                 };
             };
         };
@@ -3399,7 +3399,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___1"];
+                    "application/json": components["schemas"]["Envelope_SessionOut_"];
                 };
             };
         };
@@ -4902,7 +4902,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SessionStart"];
+                "application/json": components["schemas"]["AgentSessionStart"];
             };
         };
         responses: {
@@ -4912,7 +4912,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___2"];
+                    "application/json": components["schemas"]["Envelope_AgentSessionOut_"];
                 };
             };
             /** @description Validation Error */
@@ -4935,7 +4935,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TurnIn"];
+                "application/json": components["schemas"]["AgentTurnIn"];
             };
         };
         responses: {
@@ -4945,7 +4945,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Envelope_TurnOut_"];
+                    "application/json": components["schemas"]["Envelope_AgentTurnOut_"];
                 };
             };
             /** @description Validation Error */

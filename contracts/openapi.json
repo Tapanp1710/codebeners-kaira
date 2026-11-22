@@ -105,7 +105,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/app__schemas__common__Envelope_SessionOut___1"
+                  "$ref": "#/components/schemas/Envelope_SessionOut_"
                 }
               }
             }
@@ -136,7 +136,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/app__schemas__common__Envelope_SessionOut___1"
+                  "$ref": "#/components/schemas/Envelope_SessionOut_"
                 }
               }
             }
@@ -178,7 +178,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/app__schemas__common__Envelope_SessionOut___1"
+                  "$ref": "#/components/schemas/Envelope_SessionOut_"
                 }
               }
             }
@@ -3016,7 +3016,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SessionStart"
+                "$ref": "#/components/schemas/AgentSessionStart"
               }
             }
           },
@@ -3028,7 +3028,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/app__schemas__common__Envelope_SessionOut___2"
+                  "$ref": "#/components/schemas/Envelope_AgentSessionOut_"
                 }
               }
             }
@@ -3057,7 +3057,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TurnIn"
+                "$ref": "#/components/schemas/AgentTurnIn"
               }
             }
           },
@@ -3069,7 +3069,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Envelope_TurnOut_"
+                  "$ref": "#/components/schemas/Envelope_AgentTurnOut_"
                 }
               }
             }
@@ -3171,6 +3171,155 @@
           "operations"
         ],
         "title": "ActionUpdate"
+      },
+      "AgentSessionOut": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "ticket": {
+            "type": "string",
+            "title": "Ticket"
+          },
+          "ws_url": {
+            "type": "string",
+            "title": "Ws Url"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In"
+          },
+          "voice_configured": {
+            "type": "boolean",
+            "title": "Voice Configured"
+          },
+          "stt_model": {
+            "type": "string",
+            "title": "Stt Model"
+          },
+          "tts_model": {
+            "type": "string",
+            "title": "Tts Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "ticket",
+          "ws_url",
+          "expires_in",
+          "voice_configured",
+          "stt_model",
+          "tts_model"
+        ],
+        "title": "AgentSessionOut"
+      },
+      "AgentSessionStart": {
+        "properties": {
+          "resume_session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume Session Id"
+          }
+        },
+        "type": "object",
+        "title": "AgentSessionStart"
+      },
+      "AgentTurnIn": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Text"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_.:-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 8
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "AgentTurnIn"
+      },
+      "AgentTurnOut": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "reply": {
+            "type": "string",
+            "title": "Reply"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language"
+          },
+          "ignored": {
+            "type": "boolean",
+            "title": "Ignored"
+          },
+          "replayed": {
+            "type": "boolean",
+            "title": "Replayed"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "title": "Duration Ms"
+          },
+          "events": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Events"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turn_id",
+          "reply",
+          "language",
+          "ignored",
+          "replayed",
+          "duration_ms",
+          "events"
+        ],
+        "title": "AgentTurnOut"
       },
       "AnswerOut": {
         "properties": {
@@ -4863,6 +5012,68 @@
         ],
         "title": "DashboardOut"
       },
+      "Envelope_AgentSessionOut_": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success",
+            "default": true
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentSessionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "Envelope[AgentSessionOut]"
+      },
+      "Envelope_AgentTurnOut_": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success",
+            "default": true
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentTurnOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "Envelope[AgentTurnOut]"
+      },
       "Envelope_AnswerOut_": {
         "properties": {
           "success": {
@@ -5669,6 +5880,37 @@
         "type": "object",
         "title": "Envelope[ReminderOut]"
       },
+      "Envelope_SessionOut_": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success",
+            "default": true
+          },
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "Envelope[SessionOut]"
+      },
       "Envelope_SimulationOut_": {
         "properties": {
           "success": {
@@ -5761,37 +6003,6 @@
         },
         "type": "object",
         "title": "Envelope[TranscriptionOut]"
-      },
-      "Envelope_TurnOut_": {
-        "properties": {
-          "success": {
-            "type": "boolean",
-            "title": "Success",
-            "default": true
-          },
-          "data": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TurnOut"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "error": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ErrorDetail"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "type": "object",
-        "title": "Envelope[TurnOut]"
       },
       "Envelope_dict_": {
         "properties": {
@@ -8946,23 +9157,33 @@
         ],
         "title": "ResolutionOut"
       },
-      "SessionStart": {
+      "SessionOut": {
         "properties": {
-          "resume_session_id": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "uuid"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resume Session Id"
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          },
+          "business": {
+            "$ref": "#/components/schemas/BusinessOut"
+          },
+          "csrf_token": {
+            "type": "string",
+            "title": "Csrf Token",
+            "description": "Send as X-CSRF-Token on POST/PATCH/PUT/DELETE."
+          },
+          "access_token_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Access Token Expires At"
           }
         },
         "type": "object",
-        "title": "SessionStart"
+        "required": [
+          "user",
+          "business",
+          "csrf_token",
+          "access_token_expires_at"
+        ],
+        "title": "SessionOut"
       },
       "ShortfallOut": {
         "properties": {
@@ -9473,93 +9694,6 @@
         ],
         "title": "TranscriptionOut"
       },
-      "TurnIn": {
-        "properties": {
-          "text": {
-            "type": "string",
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Text"
-          },
-          "turn_id": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64,
-                "pattern": "^[A-Za-z0-9_.:-]+$"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Turn Id"
-          },
-          "language": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 8
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Language"
-          }
-        },
-        "type": "object",
-        "required": [
-          "text"
-        ],
-        "title": "TurnIn"
-      },
-      "TurnOut": {
-        "properties": {
-          "turn_id": {
-            "type": "string",
-            "title": "Turn Id"
-          },
-          "reply": {
-            "type": "string",
-            "title": "Reply"
-          },
-          "language": {
-            "type": "string",
-            "title": "Language"
-          },
-          "ignored": {
-            "type": "boolean",
-            "title": "Ignored"
-          },
-          "replayed": {
-            "type": "boolean",
-            "title": "Replayed"
-          },
-          "duration_ms": {
-            "type": "integer",
-            "title": "Duration Ms"
-          },
-          "events": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Events"
-          }
-        },
-        "type": "object",
-        "required": [
-          "turn_id",
-          "reply",
-          "language",
-          "ignored",
-          "replayed",
-          "duration_ms",
-          "events"
-        ],
-        "title": "TurnOut"
-      },
       "UpcomingBillOut": {
         "properties": {
           "id": {
@@ -9725,140 +9859,6 @@
           "message"
         ],
         "title": "WarningOut"
-      },
-      "app__api__v1__endpoints__agent__SessionOut": {
-        "properties": {
-          "session_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Session Id"
-          },
-          "ticket": {
-            "type": "string",
-            "title": "Ticket"
-          },
-          "ws_url": {
-            "type": "string",
-            "title": "Ws Url"
-          },
-          "expires_in": {
-            "type": "integer",
-            "title": "Expires In"
-          },
-          "voice_configured": {
-            "type": "boolean",
-            "title": "Voice Configured"
-          },
-          "stt_model": {
-            "type": "string",
-            "title": "Stt Model"
-          },
-          "tts_model": {
-            "type": "string",
-            "title": "Tts Model"
-          }
-        },
-        "type": "object",
-        "required": [
-          "session_id",
-          "ticket",
-          "ws_url",
-          "expires_in",
-          "voice_configured",
-          "stt_model",
-          "tts_model"
-        ],
-        "title": "SessionOut"
-      },
-      "app__schemas__common__Envelope_SessionOut___1": {
-        "properties": {
-          "success": {
-            "type": "boolean",
-            "title": "Success",
-            "default": true
-          },
-          "data": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/app__schemas__core__SessionOut"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "error": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ErrorDetail"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "type": "object",
-        "title": "Envelope[SessionOut]"
-      },
-      "app__schemas__common__Envelope_SessionOut___2": {
-        "properties": {
-          "success": {
-            "type": "boolean",
-            "title": "Success",
-            "default": true
-          },
-          "data": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/app__api__v1__endpoints__agent__SessionOut"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "error": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ErrorDetail"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "type": "object",
-        "title": "Envelope[SessionOut]"
-      },
-      "app__schemas__core__SessionOut": {
-        "properties": {
-          "user": {
-            "$ref": "#/components/schemas/UserOut"
-          },
-          "business": {
-            "$ref": "#/components/schemas/BusinessOut"
-          },
-          "csrf_token": {
-            "type": "string",
-            "title": "Csrf Token",
-            "description": "Send as X-CSRF-Token on POST/PATCH/PUT/DELETE."
-          },
-          "access_token_expires_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Access Token Expires At"
-          }
-        },
-        "type": "object",
-        "required": [
-          "user",
-          "business",
-          "csrf_token",
-          "access_token_expires_at"
-        ],
-        "title": "SessionOut"
       }
     }
   }
