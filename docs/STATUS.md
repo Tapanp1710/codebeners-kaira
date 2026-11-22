@@ -1,5 +1,15 @@
 # Status
 
+## Publication (2026-11-22)
+
+| Item | Value |
+|---|---|
+| GitHub | https://github.com/Tapanp1710/codebeners-kaira, branch `feat/server-payment-recovery` (the backend lives in the same repository on `feat/payment-integrity`) |
+| Backend compatibility | backend `0c37f8d`, API 1.1.0. `contracts/openapi.json` is identical to the backend's `docs/openapi.json` and to the spec its code generates. All 41 endpoint/method calls exist. Live check: `BACKEND_ORIGIN=… npm run contract:check` matched |
+| GitHub Actions | run 44998134229 passed: env template, contract, lint, typecheck, unit tests, build, production audit, Docker build. The e2e job is skipped until `E2E_BACKEND_ORIGIN` (variable) and `E2E_EMAIL` / `E2E_PASSWORD` (secrets) point at a **disposable** backend |
+| Before pushing | secret scan clean (working tree and history); lint, typecheck, 122 unit tests, build, Docker (non-root, proxied login), and Playwright 18/18 against a disposable backend built from the published backend commit |
+
+
 ## 2026-11-22: server-side payment recovery (branch `feat/server-payment-recovery`)
 
 | Item | Result | How |
