@@ -121,10 +121,25 @@ def test_payment_and_promise_with_schema_remaining_balance_key_executes(demo, db
     assert [(str(k.amount), k.expected_payment_date) for k in pending] == [("7000.00", next_monday())]
 
 
-def test_payment_and_promise_without_remainder_evidence_executes_nothing(demo, db):
-    """The remainder is a value too: if the model does not cite the user's words for it, the compound is not
-    executed (and the payment half is not executed on its own)."""
+def test_payment_and_promise_remainder_is_grounded_in_the_users_words(demo, db):
+    """The remainder is a value too. The model forgot to cite it, but the user did say "remaining": the server
+    grounds the flag in the user's own words, and the compound executes exactly once."""
     text = "Ramesh paid me 5,000 rupees today. He will clear the remaining amount next Monday."
+    args = {
+        "customer_name": "Ramesh",
+        "amount": 5000,
+        "expected_payment_date": next_monday().isoformat(),
+        "evidence": {"customer_name": "Ramesh", "amount": "5,000", "expected_payment_date": "next Monday"},
+    }
+    result = demo.tool("record_payment_and_promise", args, text)
+    assert result["status"] == "completed", result
+    assert outstanding(db, demo.inv_ramesh.id) == Decimal("7000.00")
+    assert len(payments_of(db, demo.inv_ramesh.id)) == 2  # the seeded 6,000 + exactly one new 5,000
+
+
+def test_payment_and_promise_without_remainder_words_executes_nothing(demo, db):
+    """If the user never said "the rest/remaining/balance", no remainder promise (and no payment) is written."""
+    text = "Ramesh paid me 5,000 rupees today. He will come by next Monday."
     args = {
         "customer_name": "Ramesh",
         "amount": 5000,
@@ -520,12 +535,6 @@ def test_telugu_amount_evidence_absent_from_transcript_is_rejected(demo, db):
     assert outstanding(db, demo.inv_ramesh.id) == Decimal("12000.00")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: evidence matching (app/services/ai/text_parse.py:normalise_text) does not apply Unicode "
-    "normalisation, so Devanagari nukta letters written precomposed in the STT transcript (U+095B 'ज़') but "
-    "decomposed by the LLM (U+091C U+093C) fail verification and a correct Hindi payment is refused.",
-)
 def test_hindi_evidence_with_different_unicode_normal_form_executes(demo, db):
     text = "रमेश ने आज पाँच हज़ार रुपये दिए"  # precomposed ZA (as some STT output is)
     evidence_amount = "पाँच हज़ार"  # the same words, decomposed (as the LLM may copy them)

@@ -402,7 +402,7 @@ def _stored_reply(db: Session, business_id: UUID, user_id: UUID, turn_id: str) -
     )
 
 
-def run_turn(
+def _run_turn(
     factory: sessionmaker[Session],
     settings: Settings,
     sarvam,
@@ -416,6 +416,7 @@ def run_turn(
     input_mode: str,
     emit: Emit,
     should_cancel: Callable[[], bool] = lambda: False,
+    claim_state: dict[str, bool] | None = None,
 ) -> TurnResult:
     t0 = time.perf_counter()
     text = text.strip()
@@ -454,6 +455,8 @@ def run_turn(
         try:
             db.commit()
             claimed = True
+            if claim_state is not None:
+                claim_state["claimed"] = True
         except IntegrityError:
             db.rollback()
             claimed = False
@@ -706,3 +709,32 @@ def conversation(db: Session, business_id: UUID, user_id: UUID, limit: int = 50)
             }
         )
     return out
+
+
+def run_turn(*args: Any, **kwargs: Any) -> TurnResult:
+    """Run one turn. If it raises after claiming the turn (LLM/provider failure, crash) and no reply was stored,
+    the claim is released, so resending the same turn_id runs it again instead of waiting for a reply that will
+    never come. That is safe: every tool call that already ran replays from its execution record (no second
+    payment)."""
+    claim_state: dict[str, bool] = {"claimed": False}
+    try:
+        return _run_turn(*args, claim_state=claim_state, **kwargs)
+    except BaseException:
+        if claim_state["claimed"]:
+            _release_claim(args[0] if args else kwargs["factory"], kwargs)
+        raise
+
+
+def _release_claim(factory: sessionmaker[Session], kw: dict[str, Any]) -> None:
+    try:
+        with factory() as db:
+            if _stored_reply(db, kw["business_id"], kw["user_id"], kw["turn_id"]) is None:
+                db.query(AgentMessage).filter(
+                    AgentMessage.business_id == kw["business_id"],
+                    AgentMessage.user_id == kw["user_id"],
+                    AgentMessage.turn_id == kw["turn_id"],
+                    AgentMessage.role == "user",
+                ).delete(synchronize_session=False)
+                db.commit()
+    except Exception:  # noqa: BLE001 - never mask the original failure
+        logger.exception("could not release the claim of a failed agent turn")

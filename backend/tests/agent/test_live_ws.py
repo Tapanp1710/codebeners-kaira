@@ -69,9 +69,13 @@ class FakeStt:
             yield ev
 
     async def close(self) -> None:
+        # Like realtime.SttStream.close(): send 'end', read Sarvam's session.end and add its billed seconds.
+        # Idempotent like the real adapter: session.end is read (and billed) only on the first close.
+        if self.closed:
+            return
         self.closed = True
         if self.session_end_on_close is not None:
-            self.queue.put_nowait({"event": "session.end", "audio_duration_s": self.session_end_on_close})
+            self.billed_audio_seconds += self.session_end_on_close
 
     @property
     def sent_audio_seconds(self) -> float:
@@ -601,13 +605,6 @@ def test_session_usage_saved_on_disconnect(voice, db):
     assert usage["stt_audio_seconds_billed"] == "12.50" and usage["status"] == "ended"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: billed STT seconds are lost on disconnect. Sarvam reports session.end {audio_duration_s} only "
-    "after it receives {'event': 'end'}, but LiveSession.run (app/services/agent/live.py, finally block) cancels "
-    "the STT event loop before calling stt.close(), and SttStream.close() (app/integrations/sarvam/realtime.py) "
-    "sends 'end' and closes the socket without reading the reply, so stt_audio_seconds stays 0.",
-)
 def test_session_end_sent_in_reply_to_end_is_billed(voice, db):
     voice.stt.session_end_on_close = 7.0
     lv = open_live(voice)
@@ -616,12 +613,6 @@ def test_session_end_sent_in_reply_to_end_is_billed(voice, db):
     assert db.get(AgentSession, uuid.UUID(lv.session_id)).stt_audio_seconds == Decimal("7.00")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: realtime.SttStream.close() docstring promises a graceful end 'so Sarvam reports session.end "
-    "(billed audio) before the socket closes', but it sends {'event':'end'} and closes immediately without "
-    "reading, so billed_audio_seconds never includes the final session.end.",
-)
 def test_real_stt_adapter_close_collects_session_end():
     class FakeWire:
         def __init__(self):
@@ -635,6 +626,11 @@ def test_real_stt_adapter_close_collects_session_end():
         async def close(self):
             return None
 
+        async def recv(self):
+            if self.inbox:
+                return self.inbox.pop(0)
+            raise TimeoutError
+
         def __aiter__(self):
             return self
 
@@ -646,6 +642,7 @@ def test_real_stt_adapter_close_collects_session_end():
     async def scenario():
         stt = realtime.SttStream.__new__(realtime.SttStream)
         stt.billed_audio_seconds, stt.sent_bytes = 0.0, 0
+        stt.session_ended, stt.last_send_at = False, 0.0
         stt.ws = wire = FakeWire()
         await stt.close()
         assert wire.sent == [{"event": "end"}]

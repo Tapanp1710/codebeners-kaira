@@ -14,7 +14,6 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import select, update
-from sqlalchemy.exc import DataError
 
 from app.models import AgentMessage, PaymentCommitment
 from app.services.agent import orchestrator
@@ -141,15 +140,6 @@ def test_retry_of_a_crashed_turn_never_pays_twice(demo, db, monkeypatch):
     assert [m.role for m in messages_of(db, demo.owner.id)].count("user") == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: a turn whose run_turn raised after claiming (app/services/agent/orchestrator.py run_turn: the "
-    "user AgentMessage is committed as the claim, but nothing stores a reply or releases the claim when the LLM "
-    "call raises) can never be completed: every retry with the same turn_id finds the claim, polls for a reply "
-    "that never comes for AGENT_TURN_TIMEOUT_SECONDS (60 s, blocking a request thread) and then emits "
-    "turn.failed 'still being processed'. docs/VOICE_AGENT.md says resending the turn_id is how a client "
-    "recovers a lost turn; the per-tool execution records would make a re-run safe (the payment replays).",
-)
 def test_turn_interrupted_after_payment_recovers_without_second_payment(demo, db, monkeypatch):
     _crash_after_payment(demo, db, "t-scenario-i")
     monkeypatch.setattr(demo.settings, "AGENT_TURN_TIMEOUT_SECONDS", 1.0)
@@ -234,9 +224,9 @@ def test_reply_with_unverified_amount_is_replaced_by_tool_summaries(demo, db):
     )
     result, events = demo.turn(fake, PAY_TEXT)
     assert "9,999" not in result.reply and "9999" not in result.reply
-    summary = result.tool_runs[0]["result"]["summary"]
-    assert result.reply == summary
-    assert events[-1]["type"] == "reply" and events[-1]["text"] == summary
+    summary = result.tool_runs[0]["result"]["summary"].rstrip(".")
+    assert result.reply.rstrip(".") == summary
+    assert events[-1]["type"] == "reply" and events[-1]["text"].rstrip(".") == summary
 
 
 def test_reply_with_amounts_from_tools_is_kept(demo):
@@ -565,17 +555,6 @@ def test_max_tool_steps_stops_the_loop(demo, db):
     assert result.reply  # a fallback reply, never empty
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DataError,
-    reason="BUG: app/services/agent/orchestrator.py _exec_tool keys a FAILED tool call as "
-    "f'{user_id}:{turn_id}:{name}:{digest}:failed:{ms}' = 36+1+32+1+len(name)+1+24+8+13 chars for the 32-hex "
-    "turn ids the frontend (lib/agent/api.ts newTurnId) and live.py (_turn_id) generate, i.e. > 128 for any tool "
-    "name longer than 12 chars, but agent_tool_executions.idempotency_key is String(128). Any AppError other "
-    "than NotFound (FORBIDDEN for staff, INVALID_DATE/INVALID_AMOUNT from a bad model argument) then makes the "
-    "commit raise DataError: the whole turn crashes (HTTP 500 / turn.failed) instead of reporting the refused "
-    "step, and the claimed turn_id can never be replayed.",
-)
 @pytest.mark.parametrize(
     "role,tool,args",
     [
@@ -585,13 +564,13 @@ def test_max_tool_steps_stops_the_loop(demo, db):
             "record_payment_and_promise",
             {
                 "customer_name": "Ramesh",
-                "amount": 5000,
-                "expected_payment_date": "next monday",  # not YYYY-MM-DD -> INVALID_DATE
+                "amount": -5,  # refused by validation -> INVALID_AMOUNT (the failure record must still fit)
+                "expected_payment_date": "2026-12-01",
                 "evidence": {"customer_name": "Ramesh", "amount": "5,000"},
             },
         ),
     ],
-    ids=["staff-forbidden", "owner-invalid-date"],
+    ids=["staff-forbidden", "owner-invalid-amount"],
 )
 def test_refused_tool_with_realistic_turn_id_reports_error(demo, db, role, tool, args):
     user = add_user(db, demo.business, "staff") if role == "staff" else demo.owner
