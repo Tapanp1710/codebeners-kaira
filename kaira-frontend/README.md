@@ -5,8 +5,8 @@ and forecasts, and speak or type what happened. KAIRA turns it into proposals th
 approves them.
 
 **The full project documentation** (problem, architecture, voice workflow, financial integrity model, security, backend
-setup, environment, demo) is in the backend README on the repository's default branch, `feat/payment-integrity`. This
-README covers the frontend. Deeper frontend design notes are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+setup, environment, demo) is in `../backend/README.md` and the root `README.md` of this monorepo. This README covers
+the frontend. Deeper frontend design notes are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · TanStack Query · openapi-fetch · Recharts ·
 Vitest · Playwright.

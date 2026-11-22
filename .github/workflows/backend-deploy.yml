@@ -1,10 +1,12 @@
-# Manual, approval-gated deployment. Nothing deploys automatically.
+# KAIRA monorepo workflow: .github/workflows/backend-deploy.yml
+# Derived from backend/.github/workflows/deploy.yml. Still MANUAL ONLY (workflow_dispatch + typed confirmation
+# + "production" environment approval). The only change is the reusable-workflow path.
 #
 # Required (GitHub > Settings > Environments > "production"; add required reviewers there):
-#   secrets.DEPLOY_HOOK_URL      deploy hook of the hosting provider (e.g. Render/Railway deploy hook)
+#   secrets.DEPLOY_HOOK_URL      deploy hook of the hosting provider
 #   vars.PRODUCTION_API_URL      public base URL, e.g. https://api.example.com
-# The hosting service must run `python -m app.cli migrate` as its pre-deploy/release command
-# (see docs/DEPLOYMENT.md). Back up the production database before deploying schema changes.
+# The hosting service must run `python -m app.cli migrate` (in backend/) as its pre-deploy/release command
+# and must use backend/ as its root/build context.
 name: backend-deploy
 
 on:
@@ -19,7 +21,7 @@ permissions:
 
 jobs:
   checks:
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/backend.yml
 
   deploy:
     needs: checks

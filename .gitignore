@@ -1,0 +1,43 @@
+# KAIRA monorepo - root .gitignore (DRAFT)
+# App-specific rules stay in backend/.gitignore and kaira-frontend/.gitignore; this file only covers
+# the repository root and machine-local clutter. It contains no negations, so it cannot re-include
+# anything an app-level file ignores, and it ignores no tracked path (checked against both trees).
+
+# secrets: real env files anywhere (templates such as .env.example / .env.production.example stay tracked;
+# the per-app files re-allow them and a root pattern cannot override a deeper "!" rule)
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.env.test
+
+# keys and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# local tooling / agent state at any level
+.codebenders/
+.dist/
+.vscode/
+.idea/
+.claude/
+*.code-workspace
+
+# local git worktrees and scratch folders that live next to the apps
+/wt/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# logs and local runtime state
+*.log
+.run/

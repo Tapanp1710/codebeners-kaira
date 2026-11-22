@@ -1,14 +1,28 @@
-# Frontend CI: quality gates on pushes to main and feat/** branches and on every pull request.
+# KAIRA monorepo workflow: .github/workflows/frontend.yml
+# Derived 1:1 from kaira-frontend/.github/workflows/ci.yml (frontend ref 9114fb9). Every check is kept;
+# only paths changed: run steps execute in kaira-frontend/, npm cache and artifact paths point there.
 name: frontend-ci
 
 on:
   push:
     branches: [main, "feat/**"]
+    paths:
+      - "kaira-frontend/**"
+      - ".github/workflows/frontend.yml"
   pull_request:
+    paths:
+      - "kaira-frontend/**"
+      - ".github/workflows/frontend.yml"
+  # Manual full run, e.g. when a path-filtered run was skipped but a check is required.
+  workflow_dispatch:
 
 # Least privilege: the workflow token can only read repository contents.
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: kaira-frontend
 
 jobs:
   # Gate job: the docker and e2e jobs both depend on it (needs: checks).
@@ -20,15 +34,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          # setup-node looks for a lockfile at the workspace root unless told otherwise.
+          cache-dependency-path: kaira-frontend/package-lock.json
       # Exact install from package-lock.json.
       - run: npm ci --no-audit --no-fund
-      # Validates the committed .env.example as if it were .env.local (valid BACKEND_ORIGIN, no secrets in NEXT_PUBLIC_ or backend-only keys).
+      # Validates the committed .env.example as if it were .env.local.
       - name: Environment template is valid
         run: cp .env.example .env.local && node scripts/check-env.mjs
       # No BACKEND_ORIGIN is set in this job, so the live-backend comparison is skipped; spec hash and generated types must still match.
       - name: Contract and generated types are consistent
         run: node scripts/contract.mjs check
-      # ESLint with --max-warnings=0, then next typegen + tsc --noEmit, Vitest unit/component tests and a production build.
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
@@ -51,7 +66,6 @@ jobs:
     needs: checks
     # Runs only when the repository variable E2E_BACKEND_ORIGIN is set; otherwise the job is skipped, not failed.
     if: ${{ vars.E2E_BACKEND_ORIGIN != '' }}
-    # The backend origin is a plain repository variable; the owner login comes from encrypted secrets.
     env:
       BACKEND_ORIGIN: ${{ vars.E2E_BACKEND_ORIGIN }}
       E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
@@ -62,15 +76,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: kaira-frontend/package-lock.json
       - run: npm ci --no-audit --no-fund
-      # Browser binary plus OS dependencies; Chromium only, matching the single project in playwright.config.ts.
       - run: npx playwright install --with-deps chromium
       # playwright.config.ts starts `next start` itself, so a production build must exist first.
       - run: npm run build
       - run: npx playwright test
-      # On failure the HTML report is uploaded as an artifact for debugging.
+      # actions/* `with.path` is NOT affected by defaults.run.working-directory: give the repo-relative path.
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-report
-          path: playwright-report
+          path: kaira-frontend/playwright-report

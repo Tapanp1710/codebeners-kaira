@@ -2,14 +2,11 @@
 
 **An AI-powered business operations partner for small businesses.** The owner says or types what happened, for
 example *"Ramesh paid me 5,000 rupees today. He will clear the remaining amount next Monday."* KAIRA turns it into
-proposed business records. Nothing is written until the owner approves.
+business records. Clear, complete instructions from the owner execute autonomously through the backend's
+validated services; anything missing, ambiguous or unverifiable is asked back or read back for confirmation.
 
-This repository holds both applications on separate branches. The histories are unrelated and not merged.
-
-| Branch | Application |
-|---|---|
-| `feat/payment-integrity` (default; this README) | Backend: FastAPI, PostgreSQL, Sarvam AI |
-| `feat/server-payment-recovery` | Frontend: Next.js web app (its README covers frontend details) |
+This is the backend of the KAIRA monorepo (`backend/`); the web app is in `kaira-frontend/` and the overview is the
+root `README.md`. The live voice agent contract is [docs/VOICE_AGENT.md](docs/VOICE_AGENT.md).
 
 ---
 
