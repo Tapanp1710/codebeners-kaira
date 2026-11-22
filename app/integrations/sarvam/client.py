@@ -262,6 +262,29 @@ class SarvamClient:
             payload["reasoning_effort"] = self.settings.SARVAM_LLM_REASONING_EFFORT
         return self._chat(payload)
 
+    # OpenAI-style tool calling (verified: sarvam-105b returns finish_reason "tool_calls" with
+    # message.tool_calls[].function.{name, arguments}). Returns the raw assistant message and usage.
+    def chat_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], max_tokens: int | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        payload: dict[str, Any] = {
+            "model": self.settings.SARVAM_LLM_MODEL,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "temperature": 0.2,
+            "max_tokens": max_tokens or self.settings.SARVAM_LLM_MAX_TOKENS,
+        }
+        if self.settings.SARVAM_LLM_REASONING_EFFORT:
+            payload["reasoning_effort"] = self.settings.SARVAM_LLM_REASONING_EFFORT
+        body = self._post("AI assistant", "/v1/chat/completions", json=payload)
+        try:
+            message = body["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError("AI assistant: unexpected provider response shape.") from exc
+        return message, body.get("usage") or {}
+
     # Shared by both chat helpers. Returns only the first choice's message content.
     def _chat(self, payload: dict[str, Any]) -> str:
         body = self._post("AI assistant", "/v1/chat/completions", json=payload)

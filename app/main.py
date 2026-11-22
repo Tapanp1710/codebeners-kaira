@@ -19,7 +19,7 @@ from app.integrations.sarvam import SarvamClient
 
 logger = logging.getLogger("kaira")
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 
 
 # Application factory. Wires shared state (settings, engine, session factory, rate limiter,

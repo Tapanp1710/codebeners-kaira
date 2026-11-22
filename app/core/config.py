@@ -113,6 +113,27 @@ class Settings(BaseSettings):
     # auto: Sarvam LLM when SARVAM_API_KEY is set, otherwise deterministic rules.
     AI_EXTRACTION_PROVIDER: Literal["auto", "sarvam", "rules"] = "auto"
 
+    # --- live voice agent -------------------------------------------------------------------
+    # Realtime STT (wss .../speech-to-text-realtime/ws) and streaming TTS (wss .../text-to-speech/ws),
+    # verified against docs.sarvam.ai on 2026-11-22. The WebSocket base is derived from SARVAM_BASE_URL.
+    AGENT_STT_LANGUAGE: str = "auto"  # auto-detect; te-IN / hi-IN / en-IN pin one language
+    AGENT_STT_STREAM_TYPE: Literal["fast", "balanced"] = "fast"
+    AGENT_VAD_THRESHOLD: float = 0.3
+    AGENT_VAD_SILENCE_MS: int = 900
+    AGENT_VAD_PREFIX_PADDING_MS: int = 300
+    AGENT_VAD_MIN_SPEECH_MS: int = 250
+    AGENT_TTS_SAMPLE_RATE: int = 22050  # linear16 PCM to the browser (8000/16000/22050/24000)
+    AGENT_MAX_TOOL_STEPS: int = 6
+    AGENT_TURN_TIMEOUT_SECONDS: float = 60.0
+    AGENT_HISTORY_MESSAGES: int = 16
+    AGENT_TICKET_TTL_SECONDS: int = 60
+    # auto: clear, complete, owner-issued instructions execute without a confirmation step;
+    # confirm: every write waits for a spoken/typed "yes". Staff writes always wait for the owner.
+    AGENT_AUTONOMY: Literal["auto", "confirm"] = "auto"
+    # Where browsers open the live WebSocket. Next.js route handlers cannot proxy WebSockets, so the
+    # browser connects to the backend directly with a short-lived single-use ticket (no cookies needed).
+    AGENT_PUBLIC_WS_URL: str = "ws://127.0.0.1:8000/api/v1/agent/live"
+
     # --- demo seed ---------------------------------------------------------------------
     DEMO_OWNER_EMAIL: str = "demo@kaira.local"
     DEMO_OWNER_PASSWORD: str | None = None

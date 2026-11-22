@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     actions,
+    agent,
     assistant,
     auth,
     bills,
@@ -28,3 +29,4 @@ api_router.include_router(finance.router)
 api_router.include_router(voice.router)
 api_router.include_router(assistant.router)
 api_router.include_router(actions.router)
+api_router.include_router(agent.router)
