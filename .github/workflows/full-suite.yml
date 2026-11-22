@@ -1,0 +1,27 @@
+# KAIRA monorepo workflow: .github/workflows/full-suite.yml
+# MANUAL ONLY. Runs every check for the selected ref in one run, ignoring all path filters:
+#   backend  -> backend.yml  (ruff, migrations + alembic check + round trip, OpenAPI diff, pytest on PostgreSQL,
+#                             pip-audit, Docker image + insecure-config refusal)
+#   frontend -> frontend.yml (env template, contract/types, lint, typecheck, vitest, build, npm audit, Docker image;
+#                             plus the staging e2e job only if vars.E2E_BACKEND_ORIGIN is set)
+#   e2e      -> e2e.yml      (PostgreSQL + seeded backend + production frontend + Playwright; no secrets needed)
+# The three run in parallel; the run fails if any of them fails. Nothing is deployed.
+name: full-suite
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    uses: ./.github/workflows/backend.yml
+
+  frontend:
+    uses: ./.github/workflows/frontend.yml
+    # Same secrets as a direct run (only the optional staging e2e job reads any).
+    secrets: inherit
+
+  e2e:
+    uses: ./.github/workflows/e2e.yml
