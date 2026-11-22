@@ -15,7 +15,12 @@ Guarantees (PostgreSQL-enforced where possible):
   `succeeded` and returns the original result.
 - Cancellation is allowed only for a pending attempt while holding its row lock and the invoice/bill row
   lock, and only when no payment exists under its key. Otherwise the attempt stays recoverable.
-- Pending attempts never expire.
+- Pending attempts never expire on their own. Execution first commits an execution lease (who, when, until
+  when) in a short transaction of its own, so other workers can see an execution may be in flight.
+- Reconciliation (`reconcile_pending`, CLI `reconcile-payment-attempts`) resolves stale pending attempts only
+  from proof found while holding the attempt row lock and the invoice/bill row lock: a matching payment under
+  the key -> succeeded and linked; no payment under the key and no live lease -> cancelled; anything else
+  stays pending. Elapsed time alone never cancels anything.
 
 Lock order everywhere is attempt row, then invoice/bill row (registration takes only the invoice/bill row).
 """
@@ -24,8 +29,9 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from dataclasses import dataclass
-from datetime import date
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -41,6 +47,10 @@ from app.utils.money import ZERO, q2
 
 # Errors from the payment path that mean "processed and refused; nothing was recorded".
 DEFINITIVE_STATUS_CODES = (404, 422)
+
+# How long an execution claims an attempt. The payment itself commits in milliseconds and holds the attempt
+# row lock throughout, so this only has to cover the gap between the claim commit and that lock.
+EXECUTION_LEASE = timedelta(minutes=2)
 
 
 @dataclass
@@ -60,14 +70,21 @@ def _model(resource_type: str):
     return Invoice if resource_type == "invoice" else Bill
 
 
-def _lock_resource(db: Session, business_id: uuid.UUID, resource_type: str, resource_id: uuid.UUID):
+def _lock_resource(
+    db: Session, business_id: uuid.UUID, resource_type: str, resource_id: uuid.UUID, *, required: bool = True
+):
     model = _model(resource_type)
     row = db.scalar(
         select(model).where(model.id == resource_id, model.business_id == business_id).with_for_update()
     )
-    if row is None:
+    if row is None and required:
         raise NotFoundError(f"{resource_type.capitalize()} not found.")
     return row
+
+
+def _db_now(db: Session) -> datetime:
+    # Database time, so leases mean the same thing to every worker regardless of host clocks.
+    return db.scalar(select(func.now()))
 
 
 def _canonical(actor, data: PaymentAttemptCreate) -> tuple[dict, str]:
@@ -114,6 +131,7 @@ def _matches(recorded, attempt: PaymentAttempt) -> bool:
 
 
 def _audit(db: Session, actor, attempt: PaymentAttempt, action: str, extra: dict | None = None) -> None:
+    """actor=None records a system action (the reconciler)."""
     after = {
         "status": attempt.status,
         "resource_type": attempt.resource_type,
@@ -125,7 +143,7 @@ def _audit(db: Session, actor, attempt: PaymentAttempt, action: str, extra: dict
     audit_service.record(
         db,
         business_id=attempt.business_id,
-        user_id=actor.user_id,
+        user_id=actor.user_id if actor is not None else None,
         action_type=f"payment_attempt.{action}",
         entity_type="payment_attempt",
         entity_id=attempt.id,
@@ -133,10 +151,22 @@ def _audit(db: Session, actor, attempt: PaymentAttempt, action: str, extra: dict
     )
 
 
+def _release_lease(attempt: PaymentAttempt) -> None:
+    attempt.lease_owner = None
+    attempt.lease_expires_at = None
+
+
 def _succeed(attempt: PaymentAttempt, payment_id: uuid.UUID) -> None:
     attempt.status = "succeeded"
     attempt.payment_id = payment_id
     attempt.completed_at = utcnow()
+    _release_lease(attempt)
+
+
+def _cancel(attempt: PaymentAttempt) -> None:
+    attempt.status = "cancelled"
+    attempt.completed_at = utcnow()
+    _release_lease(attempt)
 
 
 def register(db: Session, actor, data: PaymentAttemptCreate) -> Registration:
@@ -220,7 +250,8 @@ def get(db: Session, business_id: uuid.UUID, attempt_id: uuid.UUID, *, lock: boo
     q = select(PaymentAttempt).where(
         PaymentAttempt.id == attempt_id, PaymentAttempt.business_id == business_id
     )
-    attempt = db.scalar(q.with_for_update() if lock else q)
+    # populate_existing: a locked read must see the committed row, not a stale identity-map copy.
+    attempt = db.scalar(q.with_for_update().execution_options(populate_existing=True) if lock else q)
     if attempt is None:
         raise NotFoundError("Payment attempt not found.")
     return attempt
@@ -252,9 +283,7 @@ def list_attempts(
     return list(rows), total
 
 
-def execute(db: Session, actor, attempt_id: uuid.UUID) -> Outcome:
-    """Runs (or re-runs) the frozen request with the attempt's key. Caller commits, then raises `error`."""
-    attempt = get(db, actor.business_id, attempt_id, lock=True)
+def _terminal_outcome(attempt: PaymentAttempt) -> Outcome | None:
     if attempt.status == "succeeded":
         return Outcome(attempt, replayed=True)
     if attempt.status == "rejected":
@@ -264,6 +293,42 @@ def execute(db: Session, actor, attempt_id: uuid.UUID) -> Outcome:
         )
     if attempt.status == "cancelled":
         raise ConflictError("This payment attempt was cancelled.", code="PAYMENT_ATTEMPT_CANCELLED")
+    return None
+
+
+def _claim(db: Session, actor, attempt: PaymentAttempt, lease: timedelta) -> None:
+    """Records who is executing and until when. The caller holds the attempt row lock and commits."""
+    now = _db_now(db)
+    attempt.execution_started_at = now
+    attempt.execution_started_by = actor.user_id
+    attempt.lease_owner = f"exec_{secrets.token_hex(12)}"
+    # Never shorten a lease another execution may still rely on.
+    expires = now + lease
+    if attempt.lease_expires_at is not None and attempt.lease_expires_at > expires:
+        expires = attempt.lease_expires_at
+    attempt.lease_expires_at = expires
+    _audit(db, actor, attempt, "execution_started", {"lease_expires_at": expires.isoformat()})
+
+
+def execute(db: Session, actor, attempt_id: uuid.UUID, *, lease: timedelta = EXECUTION_LEASE) -> Outcome:
+    """Runs (or re-runs) the frozen request with the attempt's key.
+
+    Two transactions: (1) under the attempt lock, claim an execution lease and COMMIT it, so reconcilers can
+    see an execution may be in flight; (2) re-lock the attempt, re-check it is still pending, and record the
+    payment and the attempt's transition together. The caller commits (2), then raises `error`. A crash
+    during (2) rolls back everything except the lease, which simply expires; the reconciler then proves
+    from the key whether anything was recorded."""
+    attempt = get(db, actor.business_id, attempt_id, lock=True)
+    terminal = _terminal_outcome(attempt)
+    if terminal is not None:
+        return terminal
+    _claim(db, actor, attempt, lease)
+    db.commit()
+
+    attempt = get(db, actor.business_id, attempt_id, lock=True)
+    terminal = _terminal_outcome(attempt)  # resolved by someone else in between
+    if terminal is not None:
+        return terminal
 
     p = attempt.request_payload
     kwargs = dict(
@@ -292,6 +357,7 @@ def execute(db: Session, actor, attempt_id: uuid.UUID) -> Outcome:
         attempt.failure_code = e.code
         attempt.failure_message = e.message
         attempt.completed_at = utcnow()
+        _release_lease(attempt)
         _audit(db, actor, attempt, "rejected")
         return Outcome(attempt, error=e)
     _succeed(attempt, payment_id)
@@ -326,7 +392,149 @@ def cancel(db: Session, actor, attempt_id: uuid.UUID) -> Outcome:
                 code="PAYMENT_ALREADY_RECORDED",
             ),
         )
-    attempt.status = "cancelled"
-    attempt.completed_at = utcnow()
+    _cancel(attempt)
     _audit(db, actor, attempt, "cancelled")
     return Outcome(attempt)
+
+
+# ---------------------------------------------------------------------------------------- reconciliation
+
+RECONCILE_SUCCEEDED = "succeeded"  # a matching payment exists under the key: linked
+RECONCILE_CANCELLED = "cancelled"  # proven never recorded and no live execution: cancelled
+RECONCILE_PENDING = "left_pending"  # not provable either way (live lease, key conflict): untouched
+RECONCILE_SKIPPED = "skipped"  # no longer pending or no longer old enough once locked
+
+
+@dataclass
+class ReconcileItem:
+    attempt_id: uuid.UUID
+    business_id: uuid.UUID
+    resource_type: str
+    resource_id: uuid.UUID
+    outcome: str
+    reason: str
+    payment_id: uuid.UUID | None = None
+
+
+@dataclass
+class ReconcileReport:
+    dry_run: bool
+    items: list[ReconcileItem] = field(default_factory=list)
+
+    def count(self, outcome: str) -> int:
+        return sum(1 for i in self.items if i.outcome == outcome)
+
+
+def reconcile_locked(
+    db: Session, attempt: PaymentAttempt, *, now: datetime, cutoff: datetime, dry_run: bool, worker: str
+) -> ReconcileItem:
+    """Decides (and unless dry_run applies) one attempt. The caller holds the attempt row lock and commits.
+
+    Proof rules. Holding the attempt lock excludes any execution's payment transaction (it holds the same
+    lock from start to commit). Taking the invoice/bill lock waits out any direct payment with the same key
+    that is still in flight. Only then is the lookup by key conclusive:
+      - a payment under the key with the attempt's request -> succeeded, linked to that payment;
+      - a payment under the key with another request       -> left pending (needs a human);
+      - no payment, and no execution lease still running    -> cancelled (it can never execute after this);
+      - no payment, but a live lease                        -> left pending (an execution may be about to run).
+    """
+
+    def item(outcome: str, reason: str, payment_id: uuid.UUID | None = None) -> ReconcileItem:
+        return ReconcileItem(
+            attempt.id,
+            attempt.business_id,
+            attempt.resource_type,
+            attempt.resource_id,
+            outcome,
+            reason,
+            payment_id,
+        )
+
+    if attempt.status != "pending":
+        return item(RECONCILE_SKIPPED, f"already_{attempt.status}", attempt.payment_id)
+    if attempt.created_at > cutoff:
+        return item(RECONCILE_SKIPPED, "too_recent")
+
+    _lock_resource(db, attempt.business_id, attempt.resource_type, attempt.resource_id, required=False)
+    recorded = _recorded_under_key(db, attempt)
+    extra = {"via": "reconciler", "worker": worker}
+    if recorded is not None:
+        if not _matches(recorded, attempt):
+            if not dry_run:
+                attempt.last_reconciled_at = now
+            return item(RECONCILE_PENDING, "key_bound_to_different_payment")
+        if not dry_run:
+            attempt.last_reconciled_at = now
+            _succeed(attempt, recorded.id)
+            _audit(db, None, attempt, "succeeded", {**extra, "reason": "payment_found_under_key"})
+        return item(RECONCILE_SUCCEEDED, "payment_found_under_key", recorded.id)
+
+    if attempt.lease_expires_at is not None and attempt.lease_expires_at > now:
+        if not dry_run:
+            attempt.last_reconciled_at = now
+        return item(RECONCILE_PENDING, "execution_lease_active")
+
+    reason = "never_executed" if attempt.execution_started_at is None else "lease_expired_no_payment"
+    if not dry_run:
+        attempt.last_reconciled_at = now
+        _cancel(attempt)
+        _audit(db, None, attempt, "cancelled", {**extra, "reason": reason})
+    return item(RECONCILE_CANCELLED, reason)
+
+
+def reconcile_pending(
+    session_factory: Callable[[], Session],
+    *,
+    older_than: timedelta,
+    dry_run: bool = False,
+    limit: int = 500,
+    business_id: uuid.UUID | None = None,
+) -> ReconcileReport:
+    """Batch worker: reconciles pending attempts registered more than `older_than` ago, oldest first.
+
+    Each attempt is handled in its own short transaction, claimed with SELECT ... FOR UPDATE SKIP LOCKED, so
+    any number of workers (or a worker and live executions) can run at once: a row being executed or
+    reconciled elsewhere is skipped, never waited on, and never handled twice. Nothing is held across
+    attempts and all state is in the database, so a crashed or restarted worker just runs again.
+    A dry run takes the same locks and makes the same decisions, then rolls back."""
+    if older_than < timedelta(0):
+        raise ValueError("older_than must not be negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    report = ReconcileReport(dry_run=dry_run)
+    worker = f"recon_{secrets.token_hex(6)}"
+    seen: list[uuid.UUID] = []
+    while len(report.items) < limit:
+        db = session_factory()
+        try:
+            now = _db_now(db)
+            cutoff = now - older_than
+            q = select(PaymentAttempt).where(
+                PaymentAttempt.status == "pending", PaymentAttempt.created_at <= cutoff
+            )
+            if business_id is not None:
+                q = q.where(PaymentAttempt.business_id == business_id)
+            if seen:
+                q = q.where(PaymentAttempt.id.not_in(seen))
+            attempt = db.scalar(
+                q.order_by(PaymentAttempt.created_at, PaymentAttempt.id)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
+            if attempt is None:
+                db.rollback()
+                break
+            seen.append(attempt.id)
+            result = reconcile_locked(db, attempt, now=now, cutoff=cutoff, dry_run=dry_run, worker=worker)
+            if dry_run:
+                db.rollback()
+            else:
+                db.commit()
+            report.items.append(result)
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    return report

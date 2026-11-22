@@ -1,6 +1,7 @@
 # Payment attempts and cross-device recovery
 
-**Status:** implemented on `feat/payment-integrity` (migration `d50345d81159`).
+**Status:** implemented on `feat/payment-integrity` (migration `d50345d81159`); execution lease and
+reconciliation added by migration `b3f1c7a9e2d4`.
 **Audience:** backend and frontend engineers.
 
 ## Problem
@@ -40,11 +41,16 @@ used by older clients and by the assistant's approval flow, which runs server-si
 | `payment_id` | Set exactly when `succeeded` (CHECK constraint) |
 | `failure_code`, `failure_message` | Set when `rejected` |
 | `created_by`, `created_at`, `updated_at`, `completed_at` | Who registered it and when |
+| `execution_started_at`, `execution_started_by` | When and by whom the latest execution started (kept after completion) |
+| `lease_owner`, `lease_expires_at` | The live execution lease: an opaque random token (never a secret) and its expiry, in database time. Cleared on any terminal state |
+| `last_reconciled_at` | When the reconciler last examined it |
 
 Constraints enforced by PostgreSQL:
 - `UNIQUE (business_id, idempotency_key)`
 - `UNIQUE (business_id, resource_type, resource_id) WHERE status = 'pending'`: at most one unresolved payment per
   invoice or bill.
+- Lease checks: owner and expiry are set together; a lease implies `execution_started_at` and expires after it;
+  only `pending` attempts hold a lease.
 
 ## State machine
 
@@ -59,7 +65,8 @@ Constraints enforced by PostgreSQL:
 
 Rules for these transitions:
 - **Terminal states never change.**
-- **A `pending` attempt never expires.** Its outcome may be unknown, and backend keys never expire either.
+- **A `pending` attempt never expires on a timer.** Its outcome may be unknown, and backend keys never expire
+  either. Only the reconciler (below) resolves a stale attempt, and only from proof.
 - **Executing a `succeeded` attempt** returns the original payment with `replayed: true`.
 - **Executing a `rejected` attempt** returns the same 422 again.
 - **Executing a `cancelled` attempt** returns 409.
@@ -90,6 +97,45 @@ Rules for these transitions:
 - **Audit trail.** Every transition is audited: `payment_attempt.registered`, `succeeded`, `rejected` and
   `cancelled` (entity `payment_attempt`).
 
+## Execution lease and reconciliation
+
+**Execution** runs in two transactions:
+1. Lock the attempt row, record `execution_started_at/by`, a fresh `lease_owner` and `lease_expires_at`
+   (now + 2 minutes, never shortened), audit `payment_attempt.execution_started`, and **commit**. No money has moved.
+2. Lock the attempt row again, re-check it is still `pending` (it may have been resolved in between), then record
+   the payment and the attempt's terminal state together as before. The lease is cleared in the same commit.
+
+A crash during (2) rolls everything back except the lease, which then simply expires.
+
+**Reconciliation** (`python -m app.cli reconcile-payment-attempts`) handles pending attempts registered more than
+`--older-than-minutes` ago (default 30, minimum 1), oldest first, at most `--limit` (default 500) per run,
+optionally for one `--business-id`. Each attempt gets its own short transaction:
+1. `SELECT … FOR UPDATE SKIP LOCKED` claims one attempt. A row that an execution, a cancel or another worker is
+   holding is skipped, never waited on and never handled twice.
+2. It re-checks that the attempt is still pending and still old enough, then takes the invoice or bill lock. That
+   waits out any direct payment with the same key that is still in flight. Lock order stays attempt, then resource.
+3. Only now is the lookup by key conclusive:
+
+| Found under the key, under both locks | Result | Audit |
+|---|---|---|
+| A payment with the attempt's request (fingerprint, or legacy field match) | `succeeded`, linked to that payment. Nothing new is recorded | `payment_attempt.succeeded`, `via: reconciler`, `reason: payment_found_under_key` |
+| A payment with a *different* request | stays `pending` (`key_bound_to_different_payment`); needs a person | none |
+| No payment, and a lease that has not expired | stays `pending` (`execution_lease_active`) | none |
+| No payment, and no execution started or the lease expired | `cancelled` (`never_executed` / `lease_expired_no_payment`) | `payment_attempt.cancelled`, `via: reconciler` |
+
+Elapsed time alone never cancels anything: the expired lease only says no execution should still be about to
+run, and the key lookup inside the locked transaction is the proof that nothing was recorded. After a cancel, the
+attempt can never execute (`409`). Reconciler audit rows have no `user_id` (a system action). `last_reconciled_at`
+is updated on every attempt examined, including those left pending.
+
+`--dry-run` takes the same locks, makes the same decisions and rolls back. `--json` prints a machine-readable
+report. Output never contains idempotency keys or request bodies. Any number of workers can run at once, and a
+crashed or restarted worker simply runs again: all state is in the database, and every outcome is idempotent.
+
+Not covered: a client that reuses a cancelled attempt's own key on the direct `POST /invoices/{id}/payments`
+endpoint would still record a payment there, as with a manual cancel. Server-generated keys are never returned,
+so only client-supplied keys can do this.
+
 ## Verified by
 
 `tests/api/test_payment_attempts.py` (22 tests) and `tests/api/test_payment_idempotency.py` (26 tests) run on real
@@ -105,3 +151,11 @@ PostgreSQL. They cover:
 - concurrent registrations and retries;
 - safe, refused and reconciling cancellation;
 - concurrent execute against cancel.
+
+`tests/api/test_reconciliation.py` (16 tests, real PostgreSQL) covers the lease committed before money moves and
+released on completion or rejection; a payment committed while the attempt stayed pending (invoice and bill),
+linked without new money; cancellation of never-executed attempts; recent attempts left alone; a live lease
+keeping an attempt pending until it expires; an expired lease with a payment present (linked, not cancelled); a
+key bound to a different payment; dry run; business filter; two concurrent workers handling every attempt exactly
+once; a worker skipping a row locked by an execution; execute racing reconcile; and the CLI run in a fresh process
+(dry run, apply, idempotent rerun, argument errors).

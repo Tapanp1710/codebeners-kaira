@@ -21,7 +21,14 @@ class PaymentAttempt(UUIDPrimaryKey, Timestamps, Base):
         pending   -> succeeded   the payment was recorded (or replayed); payment_id is set
         pending   -> rejected    the backend processed and refused it; nothing was recorded
         pending   -> cancelled   only when the server proves no payment exists under the key
-    Terminal states never change. A pending attempt never expires.
+    Terminal states never change. A pending attempt never expires on its own; only the reconciler
+    (app/services/payment_attempt_service.py, `python -m app.cli reconcile-payment-attempts`) may resolve it,
+    and only from proof found under row locks.
+
+    Execution lease: `execute` commits execution_started_at/by, lease_owner and lease_expires_at in a short
+    transaction of its own *before* any money moves, so other workers can see that an execution may be in
+    flight. The lease is cleared when the attempt reaches a terminal state; execution_started_* are kept.
+    lease_owner is an opaque random token and never holds a secret.
     """
 
     __tablename__ = "payment_attempts"
@@ -40,11 +47,27 @@ class PaymentAttempt(UUIDPrimaryKey, Timestamps, Base):
     failure_message: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_started_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         CheckConstraint("resource_type IN ('invoice', 'bill')", name="resource_type_valid"),
         CheckConstraint("status IN ('pending', 'succeeded', 'rejected', 'cancelled')", name="status_valid"),
         CheckConstraint("(status = 'succeeded') = (payment_id IS NOT NULL)", name="payment_iff_succeeded"),
+        # A lease is an owner plus an expiry, and only exists once an execution has started.
+        CheckConstraint("(lease_owner IS NULL) = (lease_expires_at IS NULL)", name="lease_complete"),
+        CheckConstraint(
+            "lease_expires_at IS NULL OR "
+            "(execution_started_at IS NOT NULL AND lease_expires_at > execution_started_at)",
+            name="lease_after_start",
+        ),
+        # Terminal attempts hold no lease.
+        CheckConstraint("status = 'pending' OR lease_owner IS NULL", name="lease_only_pending"),
         UniqueConstraint("business_id", "idempotency_key"),
         # At most one unresolved attempt per invoice/bill: a second device must adopt it, not start another.
         Index(
@@ -56,4 +79,10 @@ class PaymentAttempt(UUIDPrimaryKey, Timestamps, Base):
             postgresql_where=text("status = 'pending'"),
         ),
         Index("ix_payment_attempts_business_status", "business_id", "status"),
+        # Reconciler scan: oldest pending attempts first.
+        Index(
+            "ix_payment_attempts_pending_created",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
     )
