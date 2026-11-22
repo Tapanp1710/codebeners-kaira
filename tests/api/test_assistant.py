@@ -375,7 +375,10 @@ def test_mocked_sarvam_telugu_extraction_and_voice(owner, client):
 
     speech = owner.data(owner.post("/voice/speak", {"text": "నమస్కారం", "language_code": "te-IN"}))
     assert speech["audio_base64"] == "UklGRg==" and speech["mime_type"] == "audio/wav"
-    assert seen["tts"]["model"] == "bulbul:v3" and seen["tts"]["speaker"] == "shubh"
+    assert seen["tts"]["model"] == "bulbul:v4-flash"
+    assert (
+        seen["tts"]["speaker"] == "kavitha_te_conversation"
+    )  # explicit Telugu persona, never an API default
 
 
 def test_mocked_sarvam_hallucinated_amount_is_removed(owner, client):

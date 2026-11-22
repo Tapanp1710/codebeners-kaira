@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import secrets
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 # Dev-only fallback when DATABASE_URL is unset. Staging/production require an explicit URL.
 DEV_DATABASE_URL = "postgresql+psycopg://kaira:kaira_dev_password@127.0.0.1:5432/kaira"
 SECURE_ENVS = {"staging", "production"}
+# Speaker-name format per Bulbul model (pattern, example). Models not listed are not checked.
+TTS_SPEAKER_FORMATS = {
+    "bulbul:v3": (r"[a-z]+", "shubh"),
+    "bulbul:v4-flash": (r"[a-z]+_[a-z]+_[a-z_]+", "aparna_hi_customer"),
+}
 
 
 class ConfigurationError(RuntimeError):
@@ -92,10 +98,13 @@ class Settings(BaseSettings):
     SARVAM_LLM_MODEL: str = "sarvam-105b"
     SARVAM_LLM_REASONING_EFFORT: str | None = "low"
     SARVAM_LLM_MAX_TOKENS: int = 4096
-    SARVAM_TTS_MODEL: str = "bulbul:v3"
-    SARVAM_TTS_SPEAKER_TE: str = "shubh"
-    SARVAM_TTS_SPEAKER_HI: str = "shubh"
-    SARVAM_TTS_SPEAKER_EN: str = "shubh"
+    # bulbul:v4-flash persona IDs, each checked against Sarvam's voice catalog (2026-11-22). Hindi and
+    # English are the docs' rank-1 customer-care picks; Telugu has four voices and no ranking, so the
+    # conversational one was chosen. Not yet auditioned live: change them in .env after listening.
+    SARVAM_TTS_MODEL: str = "bulbul:v4-flash"
+    SARVAM_TTS_SPEAKER_TE: str = "kavitha_te_conversation"
+    SARVAM_TTS_SPEAKER_HI: str = "aparna_hi_customer"
+    SARVAM_TTS_SPEAKER_EN: str = "aparna_en_companion"
     SARVAM_TTS_PACE: Decimal = Decimal("1.0")
     SARVAM_TTS_SAMPLE_RATE: int = 22050
     SARVAM_TTS_CODEC: str = "wav"
@@ -193,6 +202,19 @@ class Settings(BaseSettings):
             problems.append("COOKIE_SAMESITE=none requires COOKIE_SECURE=true (browser rule).")
         if secure and "kaira_dev_password" in (self.DATABASE_URL or ""):
             problems.append("DATABASE_URL uses the development password. Supply real production credentials.")
+
+        # Sarvam rejects (400) a speaker that does not belong to the requested model. v3 speakers are
+        # plain names ("shubh"); v4-flash personas are <name>_<language>_<style> ("aparna_hi_customer").
+        # Catching a mismatch here beats discovering it on the first spoken reply.
+        speaker_format = TTS_SPEAKER_FORMATS.get(self.SARVAM_TTS_MODEL)
+        if speaker_format is not None:
+            pattern, example = speaker_format
+            for name in ("SARVAM_TTS_SPEAKER_TE", "SARVAM_TTS_SPEAKER_HI", "SARVAM_TTS_SPEAKER_EN"):
+                if not re.fullmatch(pattern, getattr(self, name)):
+                    problems.append(
+                        f"{name}={getattr(self, name)!r} is not a {self.SARVAM_TTS_MODEL} speaker "
+                        f"(expected a name like {example!r}). A speaker must belong to SARVAM_TTS_MODEL."
+                    )
 
         if problems:
             raise ConfigurationError("KAIRA configuration is invalid:\n  - " + "\n  - ".join(problems))

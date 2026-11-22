@@ -27,7 +27,10 @@ def test_defaults() -> None:
     assert s.DEFAULT_TIMEZONE == "Asia/Kolkata"
     assert "http://localhost:3000" in s.CORS_ORIGINS
     assert s.SARVAM_STT_MODEL == "saaras:v4"
-    assert s.SARVAM_TTS_MODEL == "bulbul:v3"
+    assert s.SARVAM_TTS_MODEL == "bulbul:v4-flash"
+    assert s.tts_speaker_for("te-IN") == "kavitha_te_conversation"
+    assert s.tts_speaker_for("hi-IN") == "aparna_hi_customer"
+    assert s.tts_speaker_for("en-IN") == "aparna_en_companion"
     assert s.extraction_provider == "rules"
 
 
@@ -94,7 +97,22 @@ def test_samesite_none_requires_secure() -> None:
 
 
 def test_tts_speaker_selection() -> None:
-    s = make(SARVAM_TTS_SPEAKER_TE="kavya", SARVAM_TTS_SPEAKER_HI="priya")
+    s = make(
+        SARVAM_TTS_MODEL="bulbul:v3",
+        SARVAM_TTS_SPEAKER_TE="kavya",
+        SARVAM_TTS_SPEAKER_HI="priya",
+        SARVAM_TTS_SPEAKER_EN="shubh",
+    )
     assert s.tts_speaker_for("te-IN") == "kavya"
     assert s.tts_speaker_for("hi-IN") == "priya"
     assert s.tts_speaker_for("en-IN") == "shubh"
+
+
+def test_tts_speaker_must_belong_to_model() -> None:
+    # A v3 name with v4-flash (Sarvam would answer 400 on every spoken reply) stops startup instead.
+    with pytest.raises(ConfigurationError) as exc:
+        make(SARVAM_TTS_MODEL="bulbul:v4-flash", SARVAM_TTS_SPEAKER_HI="shubh")
+    assert "SARVAM_TTS_SPEAKER_HI" in str(exc.value) and "bulbul:v4-flash" in str(exc.value)
+    with pytest.raises(ConfigurationError) as exc:
+        make(SARVAM_TTS_MODEL="bulbul:v3")  # the v4-flash default personas are not v3 speakers
+    assert "SARVAM_TTS_SPEAKER_TE" in str(exc.value)

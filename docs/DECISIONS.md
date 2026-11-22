@@ -15,7 +15,7 @@
 | 11 | Evidence-required extraction: unsupported values are removed, not trusted. | Spec 9.3 "never invent". Deterministic enforcement rather than relying on the prompt. |
 | 12 | Customer resolution happens locally; no customer data is sent to the LLM. | Spec 14: minimise data sent to providers. |
 | 13 | "Remaining amount" commitments supersede earlier pending commitments on that invoice (audited). | Matches the demo semantics and avoids exceeding the outstanding cap. |
-| 14 | TTS default `bulbul:v3` with speaker `shubh`; STT `saaras:v4`; LLM `sarvam-105b`. | Current docs: v3 is the API default with a documented 37-speaker list; v4-flash uses different speaker IDs. All configurable. |
+| 14 | TTS default `bulbul:v4-flash` (2026-11-22; was `bulbul:v3` + `shubh`) with per-language personas te `kavitha_te_conversation`, hi `aparna_hi_customer`, en `aparna_en_companion`; STT `saaras:v4` (`transcribe` mode keeps the spoken language); LLM `sarvam-105b`. | Sarvam lists v4-flash as its latest TTS model with the same contract as v3, covering Telugu, Hindi and English. Hindi and English voices are the docs' rank-1 customer-care picks; Telugu has no ranking (4 voices). Not auditioned live yet. `bulbul:v3` + v3 speakers remains a valid setting. |
 | 15 | Login accepts any `local@domain` string. | Lookup key only. `EmailStr` rejected the spec's `demo@kaira.local`. |
 | 16 | No Redis/queues/microservices; in-process rate limiter. | Spec 4: no unjustified infrastructure. |
 | 17 | Postgres bound to 127.0.0.1 in compose; API published on 0.0.0.0 for LAN frontend access. | Two-laptop development without exposing the database. |

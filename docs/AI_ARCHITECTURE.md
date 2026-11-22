@@ -20,7 +20,7 @@ text  ────────────────────────�
 |---|---|---|---|
 | STT | `POST /speech-to-text` (multipart) | `saaras:v4` | mode `transcribe`; `te-IN`, `hi-IN`, `en-IN` or auto-detect; ≤ 30 s per request |
 | LLM | `POST /v1/chat/completions` | `sarvam-105b` | `response_format: json_schema`, temperature 0, `reasoning_effort` configurable |
-| TTS | `POST /text-to-speech` | `bulbul:v3` | speaker `shubh` (valid for v3; v4-flash uses different speaker IDs), pace 0.5–2.0, ≤ 2,500 characters, base64 audio |
+| TTS | `POST /text-to-speech` | `bulbul:v4-flash` | model and speaker always sent explicitly: te `kavitha_te_conversation`, hi `aparna_hi_customer`, en `aparna_en_companion` (catalog-verified; startup refuses a speaker that does not fit the model), pace 0.5–2.0, ≤ 2,500 characters, base64 audio |
 
 Auth header `api-subscription-key`. Models, speakers, pace, codec, sample rate, timeout and retries are all
 environment settings. The client retries only on 429/5xx/timeouts, with exponential backoff (provider

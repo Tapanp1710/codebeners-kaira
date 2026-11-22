@@ -56,7 +56,7 @@ Every script checks exit codes and stops with `FAILED …` and a non-zero exit c
 | `SARVAM_BASE_URL` | https://api.sarvam.ai | – | |
 | `SARVAM_STT_MODEL`, `SARVAM_STT_MODE` | saaras:v4, transcribe | – | |
 | `SARVAM_LLM_MODEL`, `SARVAM_LLM_REASONING_EFFORT`, `SARVAM_LLM_MAX_TOKENS` | sarvam-105b, low, 4096 | – | |
-| `SARVAM_TTS_MODEL`, `SARVAM_TTS_SPEAKER_TE/HI/EN`, `SARVAM_TTS_PACE`, `SARVAM_TTS_SAMPLE_RATE`, `SARVAM_TTS_CODEC` | bulbul:v3, shubh, 1.0, 22050, wav | – | speakers must belong to the model |
+| `SARVAM_TTS_MODEL`, `SARVAM_TTS_SPEAKER_TE/HI/EN`, `SARVAM_TTS_PACE`, `SARVAM_TTS_SAMPLE_RATE`, `SARVAM_TTS_CODEC` | bulbul:v4-flash; kavitha_te_conversation / aparna_hi_customer / aparna_en_companion; 1.0, 22050, wav | – | speakers must belong to the model (checked at startup) |
 | `SARVAM_TIMEOUT_SECONDS`, `SARVAM_MAX_RETRIES` | 60, 2 | – | |
 | `AI_EXTRACTION_PROVIDER` | auto | – | auto / sarvam / rules |
 | `DEMO_OWNER_EMAIL`, `DEMO_OWNER_PASSWORD` | demo@kaira.local, generated | – | development seed |
