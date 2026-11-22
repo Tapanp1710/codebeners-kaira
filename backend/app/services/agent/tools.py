@@ -266,6 +266,19 @@ def decide_date(
 
     def finish(d: DateDecision) -> DateDecision:
         v = d.value
+        if v is not None and d.action == "ok" and not_after_today and v < today - dt.timedelta(days=30):
+            # e.g. "paid on 5th December" said in November resolves to last December: read it back first.
+            d = DateDecision(
+                d.field,
+                d.label,
+                "confirm",
+                value=v,
+                evidence=d.evidence,
+                said=d.said,
+                proposed=d.proposed,
+                message=f"'{d.evidence}' is read as {dateres.describe(v)}, more than a month ago. "
+                f"The {label} will be {dateres.describe(v)} unless you correct it.",
+            )
         if v is not None and d.action in ("ok", "confirm"):
             if not_after_today and v > today:
                 return DateDecision(
@@ -568,6 +581,23 @@ def find_customers(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         sort="outstanding",
         page_size=int(a.get("limit") or 10),
     )
+    query = (a.get("query") or "").strip()
+    if query and not rows:
+        # The SQL search is a plain substring match on the stored (usually Latin) name, so "రమేష్" / "रमेश" or a
+        # misheard spelling finds nothing. Fall back to the same fuzzy, romanizing matcher the write tools use.
+        r = resolve_customer(
+            ctx.db,
+            ctx.actor.business_id,
+            Operation(type="query_customer_balance", customer_name=query),
+            _outstanding_map(ctx),
+        )
+        ids = [uuid.UUID(c["id"]) for c in r.candidates] or ([r.id] if r.id else [])
+        found = [customer_service.get(ctx.db, ctx.actor.business_id, i) for i in ids]
+        sums = customer_service.summaries(ctx.db, ctx.actor.business, found)
+        rows = [sums[c.id] for c in found]
+        if a.get("with_balance_only"):
+            rows = [s for s in rows if s.outstanding > ZERO]
+        total = len(rows)
     return {
         "total": total,
         "customers": [

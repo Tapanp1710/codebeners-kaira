@@ -235,15 +235,30 @@ def test_payment_yesterday_from_the_words(setup, db):
 
 
 def test_payment_dated_in_the_future_is_refused(setup, db):
+    tomorrow = business_today() + timedelta(days=1)
+    r = setup.call(
+        "record_customer_payment",
+        {"customer_name": "Ramesh", "amount": 3000, "date": tomorrow.isoformat(),
+         "evidence": {"customer_name": "Ramesh", "amount": "3000", "date": "tomorrow"}},
+        "Ramesh paid 3000 tomorrow",
+    )  # fmt: skip
+    assert r["status"] == "needs_clarification", r
+    assert "future" in r["message"]
+    assert payments(db) == []
+
+
+def test_old_yearless_payment_date_is_read_back(setup, db):
+    today = business_today()
+    old = today - timedelta(days=60)
+    phrase = f"{old.day} {old.strftime('%B')}"
     r = setup.call(
         "record_customer_payment",
         {"customer_name": "Ramesh", "amount": 3000,
-         "evidence": {"customer_name": "Ramesh", "amount": "3000", "date": "5th December"}},
-        "Ramesh paid 3000 on 5th December",
+         "evidence": {"customer_name": "Ramesh", "amount": "3000", "date": phrase}},
+        f"Ramesh paid 3000 on {phrase}",
     )  # fmt: skip
-    if D.find_dates("5th December", business_today(), prefer=D.PAST)[0].date <= business_today():
-        pytest.skip("5 December has already passed this year")
-    assert r["status"] == "needs_clarification", r
+    assert r["status"] == "needs_confirmation", r
+    assert old.isoformat() in " ".join(r["confirmation_reasons"])
     assert payments(db) == []
 
 
