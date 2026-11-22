@@ -32,6 +32,12 @@ ticket, because Next.js route handlers cannot proxy WebSockets.
 
 `turn_id` is client-generated (`[A-Za-z0-9_.:-]{1,64}`). Sending the same `turn_id` again returns the stored
 reply (`replayed: true`) and runs no tool again. That is how a client recovers a turn whose response was lost.
+A failed or cancelled turn releases its claim, so a resend with the same `turn_id` runs it again (tools that already
+executed replay from their execution records). The web client resends a typed turn only when the live socket dropped
+while it was waiting; turning live voice off (or leaving the page) marks it failed instead.
+
+`POST /agent/turn` may take up to the backend's `AGENT_TURN_TIMEOUT_SECONDS` (60 s): the Next proxy allows it 90 s
+upstream and the browser client 95 s (the same budget as the `/voice/` endpoints).
 
 ## WebSocket `GET {ws_url}?ticket=<ticket>`
 
@@ -74,7 +80,7 @@ belonging to the current reply. Play them in order, gaplessly. Drop everything b
 | `tts.first_audio` | `turn_id`, `ms_from_utterance_end` | Latency measurement |
 | `tts.end` | `turn_id` | All audio for the reply was sent |
 | `tts.stop` | `reason: "speech"\|"user"\|"new_turn"` | Barge-in: stop playback now and drop queued audio |
-| `error` | `source: "stt"\|"tts"\|"config"`, `code`, `message`, `fatal` | `fatal` = the session cannot continue |
+| `error` | `source: "stt"\|"tts"\|"config"\|"session"\|"client"`, `code`, `message`, `fatal`, `turn_id?` | `fatal` = the session cannot continue. `turn_id` names a refused typed turn (`RATE_LIMITED` for a `text` frame): that turn is over and must not be resent unless the user asks |
 
 `refresh` values: `financial` (invalidate every ledger-derived query) and `customers`.
 

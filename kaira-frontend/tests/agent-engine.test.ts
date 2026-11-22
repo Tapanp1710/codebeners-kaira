@@ -5,7 +5,15 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AgentEngine, LIVE_ELSEWHERE_MESSAGE, LOCAL_BARGE_STOP_MS, PREROLL_MS, type EngineDeps } from "@/lib/agent/engine";
+import {
+  AgentEngine,
+  LIVE_ELSEWHERE_MESSAGE,
+  LOCAL_BARGE_STOP_MS,
+  PREROLL_MS,
+  TURN_STOPPED_CODE,
+  TURN_STOPPED_MESSAGE,
+  type EngineDeps,
+} from "@/lib/agent/engine";
 import type { MicCapture } from "@/lib/agent/mic";
 import { deriveOrb, type AgentIntent } from "@/lib/agent/reducer";
 import { ApiError } from "@/lib/api/errors";
@@ -270,7 +278,7 @@ describe("typed turns", () => {
         throw new ApiError(0, { code: "NETWORK_ERROR", message: "You appear to be offline." });
       }),
     });
-    await expect(engine.sendText("hi")).resolves.toBeUndefined();
+    await expect(engine.sendText("hi")).resolves.toEqual({ ok: false, error: "You appear to be offline." });
     expect(engine.getSnapshot().error).toEqual({ code: "NETWORK_ERROR", message: "You appear to be offline.", fatal: false });
     expect(engine.getSnapshot().turnId).toBeNull();
   });
@@ -285,6 +293,82 @@ describe("typed turns", () => {
     ws().serverClose(1006);
     await vi.waitFor(() => expect(deps.postTurn).toHaveBeenCalledWith("record 500 from Ramesh", msg?.turn_id));
     engine.disable();
+  });
+
+  it("sendText resolves ok for a sent socket turn and for an answered REST turn", async () => {
+    const { engine } = makeEngine();
+    await expect(engine.sendText("hello")).resolves.toEqual({ ok: true }); // REST (not live)
+    await goLive(engine);
+    await expect(engine.sendText("hello again")).resolves.toEqual({ ok: true }); // over the socket
+    await expect(engine.sendText("   ")).resolves.toMatchObject({ ok: false });
+    engine.disable();
+  });
+
+  it("disable() does not replay a typed turn still waiting on the socket: it is marked failed", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    await engine.sendText("record 500 from Ramesh");
+    const msg = ws().json().find((m) => m.type === "text");
+    const turnId = String(msg?.turn_id);
+    ws().serverJson({ type: "turn.started", turn_id: turnId, text: "record 500 from Ramesh", language: "en-IN" });
+    ws().serverJson({ type: "tool.started", turn_id: turnId, tool: "record_payment", kind: "write", arguments: {} });
+    expect(deriveOrb(engine.getSnapshot())).toBe("executing");
+    engine.disable();
+    await Promise.resolve();
+    expect(deps.postTurn).not.toHaveBeenCalled();
+    const s = engine.getSnapshot();
+    expect(s.error).toEqual({ code: TURN_STOPPED_CODE, message: TURN_STOPPED_MESSAGE, fatal: false });
+    expect(s.turnId).toBeNull();
+    expect(s.runningTools).toEqual({});
+    expect(s.activity[0].state).toBe("failed");
+    expect(deriveOrb(s)).toBe("off");
+  });
+
+  it("detach() (leaving the page) does not replay a waiting typed turn either", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    await engine.sendText("Ramesh paid 5000 today");
+    engine.detach();
+    await Promise.resolve();
+    expect(deps.postTurn).not.toHaveBeenCalled();
+    expect(engine.getSnapshot().error?.code).toBe(TURN_STOPPED_CODE);
+    expect(engine.getSnapshot().turnId).toBeNull();
+  });
+
+  it("a fatal server error still replays a waiting typed turn over REST (the user did not turn it off)", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    await engine.sendText("how much does Ramesh owe");
+    const msg = ws().json().find((m) => m.type === "text");
+    ws().serverJson({ type: "error", source: "session", code: "SESSION_REPLACED", message: "moved", fatal: true });
+    await vi.waitFor(() => expect(deps.postTurn).toHaveBeenCalledWith("how much does Ramesh owe", msg?.turn_id));
+  });
+
+  it("a typed turn refused with RATE_LIMITED is dropped and failed, never replayed later", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    await engine.sendText("and Lakshmi Stores?");
+    const msg = ws().json().find((m) => m.type === "text");
+    ws().serverJson({
+      type: "error",
+      source: "session",
+      code: "RATE_LIMITED",
+      message: "Too many requests. Wait a moment.",
+      fatal: false,
+      turn_id: msg?.turn_id,
+    });
+    let s = engine.getSnapshot();
+    expect(s.error).toEqual({ code: "RATE_LIMITED", message: "Too many requests. Wait a moment.", fatal: false });
+    expect(s.turnId).toBeNull();
+    expect(deriveOrb(s)).toBe("listening");
+    // Neither a dropped socket nor turning live voice off resends it.
+    ws().serverClose(1006);
+    await Promise.resolve();
+    engine.disable();
+    await Promise.resolve();
+    expect(deps.postTurn).not.toHaveBeenCalled();
+    s = engine.getSnapshot();
+    expect(s.error?.code).toBe("RATE_LIMITED"); // not overwritten by a "stopped" failure for the same turn
   });
 });
 

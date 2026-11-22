@@ -375,3 +375,99 @@ describe("toolLabel", () => {
     expect(toolLabel("")).toBe("Working");
   });
 });
+
+describe("turn endings the server never announced", () => {
+  const heard = run([{ type: "transcript.final", text: "how much does Ramesh owe", language: "en-IN" }], liveOpen);
+
+  it("a final transcript thinks until its turn starts", () => {
+    expect(heard.awaitingTurn).toBe(true);
+    expect(deriveOrb(heard)).toBe("thinking");
+  });
+
+  it("turn.failed without turn.started stops thinking", () => {
+    const s = reduceAgentEvent(heard, { type: "turn.failed", turn_id: "t9", message: "Something went wrong" });
+    expect(s.awaitingTurn).toBe(false);
+    expect(deriveOrb(s)).toBe("listening");
+    expect(s.error?.code).toBe("turn_failed");
+  });
+
+  it("turn.completed / turn.cancelled without turn.started stop thinking", () => {
+    const events: ServerEvent[] = [
+      { type: "turn.completed", turn_id: "t9", ignored: false, response_ms: 5, llm_calls: 0, tools: [] },
+      { type: "turn.cancelled", turn_id: "t9" },
+    ];
+    for (const ev of events) expect(deriveOrb(reduceAgentEvent(heard, ev))).toBe("listening");
+  });
+
+  it("a replayed reply without turn.started stops thinking; a fresh reply does not end the wait by itself", () => {
+    const replayed = reduceAgentEvent(heard, { type: "reply", turn_id: "t9", text: "Ramesh owes 1,200.", language: "en-IN", replayed: true });
+    expect(replayed.awaitingTurn).toBe(false);
+    expect(deriveOrb(replayed)).toBe("listening");
+    expect(reduceAgentEvent(heard, { type: "reply", turn_id: "t9", text: "x", language: "en-IN" }).awaitingTurn).toBe(true);
+  });
+
+  it("a RATE_LIMITED refusal (no turn id) stops thinking; other non-fatal errors keep waiting", () => {
+    const limited = reduceAgentEvent(heard, { type: "error", source: "session", code: "RATE_LIMITED", message: "Too many requests.", fatal: false });
+    expect(limited.awaitingTurn).toBe(false);
+    expect(deriveOrb(limited)).toBe("listening");
+    expect(limited.error?.code).toBe("RATE_LIMITED");
+    const stt = reduceAgentEvent(heard, { type: "error", source: "stt", code: "PROVIDER_TIMEOUT", message: "slow", fatal: false });
+    expect(stt.awaitingTurn).toBe(true);
+  });
+
+  it("a non-fatal error naming a turn ends that turn", () => {
+    const typed = run([{ type: "local.turn_pending", turn_id: "t5", text: "and Lakshmi?", at: "2026-11-22T10:00:00Z", mode: "text" }], liveOpen);
+    expect(deriveOrb(typed)).toBe("thinking");
+    const s = reduceAgentEvent(typed, {
+      type: "error",
+      source: "session",
+      code: "RATE_LIMITED",
+      message: "Too many requests.",
+      fatal: false,
+      turn_id: "t5",
+    });
+    expect(s.turnId).toBeNull();
+    expect(deriveOrb(s)).toBe("listening");
+  });
+
+  it("an older turn ending while another is current keeps the current one", () => {
+    const busy = run(
+      [
+        { type: "turn.started", turn_id: "t2", text: "b", language: "en-IN" },
+        { type: "transcript.final", text: "c", language: "en-IN" },
+      ],
+      liveOpen,
+    );
+    const s = reduceAgentEvent(busy, { type: "turn.completed", turn_id: "t1", ignored: false, response_ms: 1, llm_calls: 1, tools: [] });
+    expect(s.turnId).toBe("t2");
+    expect(s.awaitingTurn).toBe(true);
+  });
+});
+
+describe("teardown ends the turn shown", () => {
+  const executing = run(
+    [
+      { type: "turn.started", turn_id: "t1", text: "record 500 from Ramesh", language: "en-IN" },
+      { type: "tool.started", turn_id: "t1", tool: "record_payment", kind: "write", arguments: {} },
+    ],
+    liveOpen,
+  );
+
+  it("local.live false clears the turn, running tools and the wait, and fails running activity", () => {
+    expect(deriveOrb(executing)).toBe("executing");
+    const s = reduceAgentEvent(executing, { type: "local.live", live: false });
+    expect(s.turnId).toBeNull();
+    expect(s.awaitingTurn).toBe(false);
+    expect(s.runningTools).toEqual({});
+    expect(s.activity[0].state).toBe("failed");
+    expect(deriveOrb(s)).toBe("off");
+  });
+
+  it("a fatal error clears the turn too and shows the error", () => {
+    const s = reduceAgentEvent(executing, { type: "error", source: "session", code: "SESSION_REPLACED", message: "moved", fatal: true });
+    expect(s.turnId).toBeNull();
+    expect(s.runningTools).toEqual({});
+    expect(s.activity[0].state).toBe("failed");
+    expect(deriveOrb(s)).toBe("error");
+  });
+});

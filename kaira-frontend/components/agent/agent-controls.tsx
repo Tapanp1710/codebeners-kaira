@@ -9,7 +9,8 @@
  *    to listen.
  *  - LiveToggle / MuteToggle / InterruptButton: the three voice controls. Mute and "Stop speaking" are disabled
  *    (not hidden) when they cannot apply, so the layout does not jump.
- *  - AgentTextForm: the typed path into the same conversation (sendText()).
+ *  - AgentTextForm: the typed path into the same conversation (sendText()). A failed turn (sendText() resolving
+ *    ok:false) keeps the text and shows "Not sent: ...".
  * The buttons are memoised (their props are primitives and the engine's stable callbacks), so the frequent agent
  * context updates while live (audio levels) do not re-render them.
  */
@@ -189,8 +190,10 @@ export function AgentTextForm({ compact, testIdPrefix = "agent" }: { compact?: b
     setSending(true);
     setError(null);
     try {
-      await sendText(value);
-      setText("");
+      // sendText() resolves ok:false (it does not reject) when the turn failed; keep the text so nothing is lost.
+      const result = await sendText(value);
+      if (result && result.ok === false) setError(`Not sent: ${result.error || "KAIRA could not answer that. Please try again."}`);
+      else setText("");
     } catch (err) {
       setError(`Not sent: ${describeAgentError(err)}`);
     } finally {

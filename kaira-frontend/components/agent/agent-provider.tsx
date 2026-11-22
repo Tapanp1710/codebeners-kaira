@@ -8,7 +8,8 @@
  * queries after agent writes) so the live session survives client-side navigation. Nothing touches the
  * microphone until enable() is called from a user gesture; after a full reload `resumeAvailable` is true instead.
  * Errors (microphone blocked, no device, insecure context, fatal server errors, failed typed turns) are reported in
- * `error`; enable() and sendText() never reject.
+ * `error`; enable() and sendText() never reject. sendText() resolves {ok: false, error} when a typed turn could not
+ * be answered, so a form can keep the text and say so.
  *
  * Levels: the 0..1 mic/output levels change ~20x/s while live. useAgentLevels() reads them from a separate context
  * backed by the engine's own levels store, so only the component that animates them (the orb) re-renders. While any

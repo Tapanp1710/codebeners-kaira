@@ -77,7 +77,15 @@ export type ServerEvent =
   | { type: "tts.first_audio"; turn_id: string; ms_from_utterance_end: number }
   | { type: "tts.end"; turn_id: string }
   | { type: "tts.stop"; reason: "speech" | "user" | "new_turn" | string }
-  | { type: "error"; source: "stt" | "tts" | "config" | string; code: string; message: string; fatal: boolean }
+  | {
+      type: "error";
+      source: "stt" | "tts" | "config" | string;
+      code: string;
+      message: string;
+      fatal: boolean;
+      /** The refused typed turn (e.g. RATE_LIMITED for a socket text frame). Additive in 1.2.x. */
+      turn_id?: string;
+    }
   | { type: "pong" };
 
 // ---------------------------------------------------------------- WebSocket: client -> server
@@ -136,6 +144,9 @@ export type AgentMetrics = {
   llm_calls?: number;
 };
 
+/** Outcome of sendText(). */
+export type SendTextResult = { ok: boolean; error?: string };
+
 export type AgentContextValue = {
   /** Live session switch (explicit user action; the browser asks for microphone permission on enable). */
   live: boolean;
@@ -145,8 +156,12 @@ export type AgentContextValue = {
   setMuted: (muted: boolean) => void;
   /** Stop KAIRA speaking now (barge-in button). */
   interrupt: () => void;
-  /** Typed input into the same conversation (works without the microphone and without live voice). */
-  sendText: (text: string) => Promise<void>;
+  /**
+   * Typed input into the same conversation (works without the microphone and without live voice). Never rejects:
+   * resolves ok:false with a user-facing message when the turn could not be sent or answered (the text should be
+   * kept). Changed in 1.2.x (was Promise<void>).
+   */
+  sendText: (text: string) => Promise<SendTextResult>;
 
   orb: OrbState;
   /** 0..1 smoothed levels for the orb animation. */

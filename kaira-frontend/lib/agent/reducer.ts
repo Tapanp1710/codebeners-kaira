@@ -76,6 +76,8 @@ export const MAX_TRANSCRIPT = 200;
 /** Error code shown when enable() is refused because another tab holds the live session. */
 export const LIVE_ELSEWHERE_CODE = "live_elsewhere";
 export const MAX_ACTIVITY = 50;
+/** Server error code of a turn refused by the per-user AI rate limit. */
+export const RATE_LIMITED_CODE = "RATE_LIMITED";
 
 export const initialAgentState: AgentEngineState = {
   live: false,
@@ -136,7 +138,12 @@ function activityStateFor(status: string): ActivityItem["state"] {
   }
 }
 
-/** Ends the current turn: clears turn flags, and marks tools of that turn still shown as running as failed. */
+/**
+ * Ends a turn: clears turn flags, and marks tools of that turn still shown as running as failed. `turnId` null ends
+ * whatever is in progress. A pending final transcript (`awaitingTurn`) is cleared whenever no other turn is current:
+ * the server can end a turn it never announced (turn.failed, a replayed answer, a refusal), and the orb must not
+ * stay on "thinking".
+ */
 function endTurn(state: AgentEngineState, turnId: string | null, failTools: boolean): AgentEngineState {
   const finishedAt = Date.now();
   const activity = failTools
@@ -152,7 +159,7 @@ function endTurn(state: AgentEngineState, turnId: string | null, failTools: bool
     activity,
     runningTools,
     turnId: sameTurn ? null : state.turnId,
-    awaitingTurn: sameTurn ? false : state.awaitingTurn,
+    awaitingTurn: sameTurn || state.turnId === null ? false : state.awaitingTurn,
   };
 }
 
@@ -262,7 +269,9 @@ export function reduceAgentEvent(state: AgentEngineState, event: AgentEvent): Ag
         language: event.language ?? null,
         at: nowIso(),
       });
-      return { ...state, transcript, lastReply: event.text };
+      // A replayed answer (the turn already ran) may come without turn.started: it ends the wait for one.
+      const awaitingTurn = event.replayed ? false : state.awaitingTurn;
+      return { ...state, transcript, lastReply: event.text, awaitingTurn };
     }
     case "ignored": {
       // Not addressed to KAIRA: mark the user's words, say nothing, do nothing.
@@ -312,9 +321,22 @@ export function reduceAgentEvent(state: AgentEngineState, event: AgentEvent): Ag
 
     case "error": {
       const error: AgentError = { code: event.code, message: event.message, fatal: event.fatal };
-      if (!event.fatal) return { ...state, error };
-      // A fatal error ends the live session (the engine closes the socket and the microphone).
-      return { ...stopSpeaking(state), error, live: false, connection: "closed", userSpeaking: false, localSpeaking: false, partial: "" };
+      if (!event.fatal) {
+        // A refused turn (RATE_LIMITED, or any error naming its turn) never starts: stop waiting for it.
+        if (event.turn_id) return { ...endTurn(state, event.turn_id, true), error };
+        if (event.code === RATE_LIMITED_CODE) return { ...state, error, awaitingTurn: false };
+        return { ...state, error };
+      }
+      // A fatal error ends the live session (the engine closes the socket and the microphone) and any turn shown.
+      return {
+        ...stopSpeaking(endTurn(state, null, true)),
+        error,
+        live: false,
+        connection: "closed",
+        userSpeaking: false,
+        localSpeaking: false,
+        partial: "",
+      };
     }
 
     case "navigate":
@@ -326,8 +348,9 @@ export function reduceAgentEvent(state: AgentEngineState, event: AgentEvent): Ag
     // ------------------------------------------------------------ local
     case "local.live":
       if (event.live) return { ...state, live: true, error: null, resumeAvailable: false };
+      // Live voice ended: no turn of this session is shown as running any more (orb off, not executing/thinking).
       return {
-        ...stopSpeaking(state),
+        ...stopSpeaking(endTurn(state, null, true)),
         live: false,
         connection: "idle",
         sttReconnecting: false,
