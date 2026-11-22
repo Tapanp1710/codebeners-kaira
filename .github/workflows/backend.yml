@@ -3,17 +3,18 @@
 # only paths changed: run steps execute in backend/, cache key and Docker context point at backend/.
 name: backend-ci
 
+# Push to main: ALWAYS runs (no path filter), so main is checked even when only the frontend changed.
+# Push to feat/**: runs only when backend/** or this file changed (decided by the `changes` job below,
+# because GitHub's push `paths` filter cannot be limited to some branches).
+# Pull requests: native path filter.
 on:
   push:
     branches: [main, "feat/**"]
-    paths:
-      - "backend/**"
-      - ".github/workflows/backend.yml"
   pull_request:
     paths:
       - "backend/**"
       - ".github/workflows/backend.yml"
-  # Called by backend-deploy.yml before any deployment (paths filters do not apply to workflow_call).
+  # Called by backend-deploy.yml before any deployment and by full-suite.yml (always runs every check).
   workflow_call:
   # Manual full run, e.g. when a path-filtered run was skipped but a check is required.
   workflow_dispatch:
@@ -26,7 +27,45 @@ defaults:
     working-directory: backend
 
 jobs:
+  # Path gate. pull_request uses GitHub's native `paths` filter above. push cannot path-filter per branch, so
+  # this job decides: pushes to main ALWAYS run; pushes to other branches run only when a file matching
+  # PATTERN changed (a new branch, force push or unknown base runs everything). workflow_call and
+  # workflow_dispatch always run.
+  changes:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' }}
+        with:
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PATTERN: '^(backend/|\.github/workflows/backend\.yml$)'
+        run: |
+          if [ "$EVENT" != "push" ] || [ "$REF" = "refs/heads/main" ]; then
+            run=true; why="$EVENT on $REF always runs"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            run=true; why="no usable base commit; running everything"
+          elif git diff --name-only "$BEFORE" "$AFTER" | grep -Eq "$PATTERN"; then
+            run=true; why="relevant files changed"
+          else
+            run=false; why="no file matching $PATTERN changed"
+          fi
+          echo "backend-ci: run=$run ($why)"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: changes
+    if: ${{ needs.changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
