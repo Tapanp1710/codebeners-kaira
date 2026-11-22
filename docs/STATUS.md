@@ -9,6 +9,20 @@
 | GitHub Actions | run 44998134229 passed: env template, contract, lint, typecheck, unit tests, build, production audit, Docker build. The e2e job is skipped until `E2E_BACKEND_ORIGIN` (variable) and `E2E_EMAIL` / `E2E_PASSWORD` (secrets) point at a **disposable** backend |
 | Before pushing | secret scan clean (working tree and history); lint, typecheck, 122 unit tests, build, Docker (non-root, proxied login), and Playwright 18/18 against a disposable backend built from the published backend commit |
 
+### Final audit (2026-11-22, branch head `019f2c0`, re-run before this docs commit)
+
+| Check | Result | Where it ran |
+|---|---|---|
+| Lint, typecheck | 0 problems; passes | local |
+| Unit / component tests | 122 / 122 passed (11 files) | local |
+| Production build | succeeds | local |
+| Contract | identical to backend `docs/openapi.json` and to the app-generated spec (1.1.0, 43 paths); all 41 called endpoint/method pairs exist; live `contract:check` matched | local, against a running backend container |
+| Playwright, full suite | **18 / 18 passed**: acceptance, invoice and bill recovery (reload, browser restart, two tabs, cross-device), auth, CSRF, voice, forecast, mobile | local, disposable backend image built from `2c78369` + PostgreSQL |
+| Docker image | builds; runs as `kaira`; `/login` 200; proxied login 200 with 2 HttpOnly cookies; `/auth/me` 200; missing CSRF header → 403 `CSRF_FAILED` | local Docker |
+| Proxy hardening (live, on the image) | malformed encoding → 400 `BAD_REQUEST_PATH`; `%2561uth` → 404 (no double decoding); path outside `/api/v1` → 404 | local Docker |
+| Dashboard pending visibility (live) | a payment registered on the server shows "1 payment awaiting confirmation" on the dashboard in a fresh browser with empty storage; executing twice records one payment | local Docker + disposable backend |
+| GitHub Actions | run `44999080477` on `019f2c0`: **success** (e2e job skipped: no `E2E_BACKEND_ORIGIN`) | GitHub |
+
 
 ## 2026-11-22: server-side payment recovery (branch `feat/server-payment-recovery`)
 
