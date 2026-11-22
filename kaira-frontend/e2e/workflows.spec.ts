@@ -5,7 +5,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 
-import { apiGet, askKaira, csrfToken, EMAIL, login, PASSWORD, settleLatestWrite, uniqueName } from "./helpers";
+import { apiGet, askKaira, csrfToken, decideProposal, EMAIL, login, PASSWORD, requireLiveAgent, settleLatestWrite, uniqueName } from "./helpers";
 
 type Customer = { id: string; outstanding: string; commitments: { status: string; amount: string }[] };
 
@@ -129,6 +129,7 @@ test.describe("KAIRA agent and approvals", () => {
   // The typed path of the voice agent: the request is executed (or proposed and approved) on the real books, and
   // every ledger view refreshes. Which path is taken is the server's autonomy policy, so both are handled.
   test("typed request to KAIRA records a payment and promise; the books and the UI refresh", async ({ page }) => {
+    requireLiveAgent();
     await login(page);
     const name = uniqueName();
     const { customerId, invoiceId } = await createCustomerWithInvoice(page, name);
@@ -165,6 +166,8 @@ test.describe("KAIRA agent and approvals", () => {
   // Staff requests and unconfirmed agent requests become proposals that the owner reviews on the Approvals page.
   // The proposals are created through the extraction API here so the review flow is tested on its own:
   // rejection changes nothing; edit + approve writes payment, promise and audit entries.
+  // The expected proposal shape is deterministic with the built-in rules extractor (AI_EXTRACTION_PROVIDER=rules,
+  // or no Sarvam key). With the Sarvam LLM extractor the operations vary between runs (see the e2e sprint report).
   test("proposal review on Approvals: reject changes nothing; edit + approve updates the books", async ({ page }) => {
     await login(page);
     const name = uniqueName();
@@ -191,9 +194,18 @@ test.describe("KAIRA agent and approvals", () => {
     await page.goto("/actions");
     const first = page.getByTestId("proposal-card").filter({ hasText: small });
     await expect(first).toBeVisible();
-    await first.getByRole("button", { name: /reject/i }).click();
-    await expect(first.getByTestId("proposal-rejected")).toBeVisible();
+    await expect(first).toHaveAttribute("data-status", "pending");
+    const paymentsBefore = await apiGet<{ total: number }>(page.request, `/invoices/${invoiceId}/payments`);
+    // decideProposal checks the backend's answer and the card's final state on the "Rejected" tab (see helpers.ts).
+    const rejected = await decideProposal(page, first, "reject");
+    expect(rejected.status).toBe("rejected");
+    // Rejection writes nothing to the books: same outstanding, no new payment, no promise ...
     expect((await apiGet<{ outstanding: string }>(page.request, `/invoices/${invoiceId}`)).outstanding).toBe("12000.00");
+    expect((await apiGet<{ total: number }>(page.request, `/invoices/${invoiceId}/payments`)).total).toBe(paymentsBefore.total);
+    expect((await apiGet<Customer>(page.request, `/customers/${customerId}`)).commitments).toHaveLength(0);
+    // ... and is audited: the proposal's trail is exactly its creation and its rejection, with no ledger write.
+    const rejectAudit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${rejected.id}`);
+    expect(rejectAudit.items.map((a) => a.action_type).sort()).toEqual(["action.proposed", "action.rejected"]);
 
     // Demo phrase
     const demo = `${name} paid me 5,000 rupees today. He will clear the remaining amount next Monday.`;
@@ -216,9 +228,10 @@ test.describe("KAIRA agent and approvals", () => {
     await card.getByLabel("Payment method").first().selectOption("upi");
     await card.getByRole("button", { name: /save changes/i }).click();
     await expect(card).toContainText("edited by the owner");
-    await card.getByRole("button", { name: /approve/i }).click();
-    await expect(card).toHaveAttribute("data-status", "executed");
-    await expect(card.getByTestId("proposal-result")).toContainText("Recorded payment of 5000.00");
+    const approved = await decideProposal(page, card, "approve");
+    expect(approved.status).toBe("executed");
+    // On the "Approved" tab the executed card lists what was recorded.
+    await expect(page.getByTestId("proposal-card").filter({ hasText: demo }).getByTestId("proposal-result")).toContainText("Recorded payment of 5000.00");
 
     // Verify the real backend state
     const invoice = await apiGet<{ outstanding: string }>(page.request, `/invoices/${invoiceId}`);
@@ -274,6 +287,7 @@ test.describe("KAIRA agent and approvals", () => {
   // The dock talks to the same session from any page: a question asked on a customer page is answered from the
   // backend's figures (the 18,000.00 invoice), and the tool run is listed on the agent home afterwards.
   test("question asked from the dock is answered from backend data; a reminder draft uses real figures", async ({ page }) => {
+    requireLiveAgent();
     await login(page);
     const name = uniqueName();
     const { customerId } = await createCustomerWithInvoice(page, name);

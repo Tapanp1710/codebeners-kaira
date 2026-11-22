@@ -6,7 +6,7 @@
  */
 import { expect, test } from "@playwright/test";
 
-import { apiGet, askKaira, login, settleLatestWrite } from "./helpers";
+import { apiGet, askKaira, LIVE_AGENT, login, settleLatestWrite } from "./helpers";
 
 const DEMO = "Ramesh paid me 5,000 rupees today. He will clear the remaining amount next Monday.";
 // Exact money helpers: "1234.50" <-> integer paise as BigInt, so expected values never pass through floats.
@@ -20,10 +20,12 @@ const inr = (v: string) => {
 };
 
 type Dashboard = { cash: { current_cash: string }; receivables: { total_outstanding: string } };
-type Customer = { id: string; name: string; outstanding: string; commitments: { status: string; amount: string; expected_payment_date: string }[] };
+type Customer = { id: string; name: string; outstanding: string; commitments: { id: string; status: string; amount: string; expected_payment_date: string }[] };
 
 // Skipped unless RUN_ACCEPTANCE=1, because the test permanently changes the seeded demo data.
 test.skip(process.env.RUN_ACCEPTANCE !== "1", "Opt-in: records a real payment on the seeded demo data (set RUN_ACCEPTANCE=1).");
+// The whole story is driven by KAIRA's typed path, which needs the live agent LLM (no key in CI).
+test.skip(!LIVE_AGENT, "Needs the live agent LLM (backend with SARVAM_API_KEY); set E2E_LIVE_AGENT=1.");
 
 test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simulation changes nothing", async ({ page, context }) => {
   // 1. Authentication: HttpOnly cookies, CSRF enforced
@@ -50,6 +52,9 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   test.skip(cents(ramesh0.outstanding) <= BigInt(500000), `Ramesh owes ${ramesh0.outstanding}; the demo needs more than 5000.00 outstanding.`);
   await expect(page.getByTestId("customer-stats")).toContainText(inr(ramesh0.outstanding));
   const remaining = money(cents(ramesh0.outstanding) - BigInt(500000));
+  type Payments = { items: { id: string; amount: string; source_action_id: string | null; invoice_id: string }[] };
+  const paymentsBefore = await apiGet<Payments>(page.request, `/customers/${customerId}/payments?page_size=100`);
+  const pendingBefore = ramesh0.commitments.filter((c) => c.status === "pending").map((c) => c.id);
 
   // 4-6. Typed request to KAIRA on the agent home (the voice agent's typed path; live voice needs the Sarvam key).
   // The server's autonomy policy either executes it at once (owner, every value evidenced) or stores a proposal
@@ -67,15 +72,28 @@ test("KAIRA end-to-end acceptance: Ramesh pays 5,000 and promises the rest; simu
   // 7. Verify actual backend changes
   const ramesh1 = await apiGet<Customer>(page.request, `/customers/${customerId}`);
   expect(ramesh1.outstanding).toBe(remaining);
-  const promise = ramesh1.commitments.find((c) => c.status === "pending");
-  expect(promise?.amount).toBe(remaining);
+  // Exactly one new promise, pending, for exactly the remaining balance. (A new promise for the same balance
+  // supersedes earlier pending ones - commitment_service._cancel_pending - which is checked in the audit below.)
+  const newPromises = ramesh1.commitments.filter((c) => !ramesh0.commitments.some((o) => o.id === c.id));
+  expect(newPromises.map((c) => [c.status, c.amount])).toEqual([["pending", remaining]]);
+  const superseded = ramesh1.commitments.filter((c) => pendingBefore.includes(c.id) && c.status !== "pending");
+  expect(superseded.every((c) => c.status === "cancelled")).toBe(true);
   // The payment must be traceable to the approved action (source_action_id) and present in the audit log.
-  const payments = await apiGet<{ items: { amount: string; source_action_id: string | null; invoice_id: string }[] }>(page.request, `/customers/${customerId}/payments`);
-  // Matched on amount as well as source_action_id: earlier runs may have left other assistant-made payments for Ramesh.
-  const payment = payments.items.find((p) => p.source_action_id && p.amount === "5000.00");
-  expect(payment).toBeTruthy();
-  const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${payment!.source_action_id}`);
-  expect(audit.items.map((a) => a.action_type)).toEqual(expect.arrayContaining(["payment.recorded", "commitment.created"]));
+  const payments = await apiGet<Payments>(page.request, `/customers/${customerId}/payments?page_size=100`);
+  // Exactly once: this run added exactly one payment, of 5,000.00, made by KAIRA (source_action_id set).
+  const known = new Set(paymentsBefore.items.map((p) => p.id));
+  const added = payments.items.filter((p) => !known.has(p.id));
+  expect(added.map((p) => p.amount)).toEqual(["5000.00"]);
+  const payment = added[0];
+  expect(payment.source_action_id).toBeTruthy();
+  const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${payment.source_action_id}`);
+  const types = audit.items.map((a) => a.action_type);
+  expect(types).toEqual(expect.arrayContaining(["payment.recorded", "commitment.created"]));
+  // One audit row per write, never a duplicate.
+  expect(types.filter((t) => t === "payment.recorded")).toHaveLength(1);
+  expect(types.filter((t) => t === "commitment.created")).toHaveLength(1);
+  // Every earlier promise that the new one replaced is audited as superseded by the same action.
+  expect(types.filter((t) => t === "commitment.superseded")).toHaveLength(superseded.length);
   const dash1 = await apiGet<Dashboard>(page.request, "/dashboard");
   // Dashboard totals move by exactly 5,000.00: cash up, receivables down.
   expect(dash1.cash.current_cash).toBe(money(cents(dash0.cash.current_cash) + BigInt(500000))); // cash inflow
