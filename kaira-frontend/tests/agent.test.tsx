@@ -21,6 +21,10 @@ import { pathOf, renderApp } from "./render";
 const mocks = vi.hoisted(() => ({ agent: null as AgentContextValue | null, pathname: "/agent" }));
 
 vi.mock("@/components/agent/agent-provider", () => ({
+  useAgentLevels: () => {
+    const a = (mocks as { agent?: { micLevel?: number; outputLevel?: number } | null }).agent;
+    return { mic: a?.micLevel ?? 0, output: a?.outputLevel ?? 0 };
+  },
   AgentProvider: ({ children }: { children: React.ReactNode }) => children,
   useAgent: () => {
     if (!mocks.agent) throw new Error("agent not set");

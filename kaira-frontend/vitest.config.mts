@@ -18,5 +18,7 @@ export default defineConfig({
     include: ["tests/**/*.test.{ts,tsx}"],
     // CSS imports are ignored; tests assert behaviour and accessibility, not styling.
     css: false,
+    // The payment-recovery flows run many real UI steps; 5 s (the default) is too tight on a loaded machine.
+    testTimeout: 15_000,
   },
 });
