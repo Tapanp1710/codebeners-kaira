@@ -56,7 +56,7 @@ describe("contract check", () => {
   it("passes for the committed contract", () => {
     const r = run();
     expect(r.code).toBe(0);
-    expect(r.out).toMatch(/OK {2}contract 1\.1\.0/);
+    expect(r.out).toMatch(/OK {2}contract 1\.2\.0/);
   });
 
   it("fails clearly when the contract file is missing, naming the real path", () => {
