@@ -61,3 +61,20 @@ git checkout feat/payment-integrity        # backend; base docs/backend-comment-
 docker compose up -d db
 .venv/Scripts/python -m pytest -q          # expects 181 passed
 ```
+
+## Publication (2026-11-22)
+
+| Item | Value |
+|---|---|
+| GitHub repository | https://github.com/Tapanp1710/codebeners-kaira (holds the backend and the frontend as **separate branches**; histories are unrelated and not merged) |
+| Backend branch | `feat/payment-integrity` (the repository's default branch, because it was pushed first to the empty repository) |
+| Frontend branch | `feat/server-payment-recovery` |
+| API contract | 1.1.0 (43 paths). The frontend's `contracts/openapi.json` is byte-for-byte identical to `docs/openapi.json`, which matches the spec the app generates. All 41 endpoint/method pairs the frontend calls exist |
+| GitHub Actions, backend | run `44998117015` on `8b856ea` **failed**: two config tests read CI's job-level env (pre-existing). Fixed in `0c37f8d`; run `44998826389` **passed** (ruff, migrations, `alembic check`, round trip, OpenAPI, pytest on PostgreSQL, pip-audit, Docker build and insecure-config refusal) |
+| GitHub Actions, frontend | run `44998134229` on `4df2b11` **passed** (env template, contract, lint, typecheck, tests, build, audit, Docker build). The e2e job is skipped: the `E2E_BACKEND_ORIGIN` variable is not set |
+| Secret scan before pushing | no secrets in the working tree or in any commit of either repository; only `.env.example` templates are tracked |
+
+Repository settings the owner may add (none are needed for CI to pass):
+- `DEPLOY_HOOK_URL` (secret, backend `deploy.yml`): the hosting provider's deploy hook. Deploy runs only manually, with a typed confirmation, and nothing has been deployed.
+- `E2E_BACKEND_ORIGIN` (variable), plus `E2E_EMAIL` and `E2E_PASSWORD` (secrets), for the frontend `e2e` job. They must point at a **disposable** backend, never production.
+- `SARVAM_API_KEY` stays out of CI. Live provider checks are a manual step.
