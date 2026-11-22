@@ -254,6 +254,12 @@ DECLINE = (
     "nahi", "nahin", "mat", "mat karo", "rehne do", "ruko", "vaddu", "ledu", "kadu", "kaadu", "aagu",
     "नहीं", "नही", "मत", "रुको", "रहने दो", "रद्द", "కాదు", "వద్దు", "లేదు", "ఆగు", "రద్దు",
 )  # fmt: skip
+# Speech-to-text often drops the "?": a question word means the user is asking, not agreeing.
+QUESTION = (
+    "what", "what's", "whats", "why", "how", "which", "who", "when", "where", "kya", "kitna", "kitne", "kaun",
+    "kyun", "enti", "entha", "evaru", "ela", "क्या", "कितना", "कितने", "कौन", "क्यों", "कैसे",
+    "ఏమిటి", "ఏంటి", "ఎంత", "ఎవరు", "ఎలా", "ఎందుకు",
+)  # fmt: skip
 
 
 def _phrase_text(text: str) -> str:
@@ -271,7 +277,7 @@ def affirmed(text: str) -> bool:
     """An explicit yes in this utterance: not a question, no 'no / wait / don't' alongside it."""
     if "?" in (text or "") or "？" in (text or ""):
         return False
-    return _has_phrase(text, AFFIRM) and not _has_phrase(text, DECLINE)
+    return _has_phrase(text, AFFIRM) and not _has_phrase(text, DECLINE) and not _has_phrase(text, QUESTION)
 
 
 def declined(text: str) -> bool:

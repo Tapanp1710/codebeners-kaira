@@ -145,7 +145,8 @@ def test_affirmations(said):
 @pytest.mark.parametrize(
     "said",
     ["wait, what is Ramesh's balance?", "yes?", "no", "ok wait", "don't", "what about Lakshmi", "नहीं",
-     "వద్దు", "Ramesh paid 5,000 today.", ""],
+     "వద్దు", "Ramesh paid 5,000 today.", "", "ok so what is the balance",
+     "haan kitna baaki hai", "సరే ఎంత ఇవ్వాలి"],
 )  # fmt: skip
 def test_not_affirmations(said):
     assert not affirmed(said)
