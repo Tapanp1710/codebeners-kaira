@@ -1,8 +1,8 @@
 # KAIRA frontend
 
 The web app for KAIRA, an AI-powered business operations partner for small businesses. Owners see cash, receivables
-and forecasts, and speak or type what happened. KAIRA turns it into proposals that are recorded only after the owner
-approves them.
+and forecasts, and talk to KAIRA (live voice or typed). The backend's agent executes clear owner instructions, reads
+back anything it cannot verify and waits for a "yes", and sends staff requests to the owner on the Approvals page.
 
 **The full project documentation** (problem, architecture, voice workflow, financial integrity model, security, backend
 setup, environment, demo) is in `../backend/README.md` and the root `README.md` of this monorepo. This README covers
@@ -12,7 +12,8 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · TanStack 
 Vitest · Playwright.
 
 Screens: **Dashboard · Customers & Invoices · Receivables · Cash-Flow Forecast · What-If Analysis**, plus Approvals,
-Settings (owner only). The KAIRA agent home (/agent, the landing screen) and a persistent agent dock on every page are the primary interface.
+Settings (owner only). The KAIRA agent home (`/agent`, the landing screen) and a persistent agent dock on every page are
+the primary interface.
 
 ## Quick start
 
@@ -42,15 +43,18 @@ jsdom 26, ESLint 9). On that version React prints a harmless warning about `Arra
 app/
   login/                     sign-in and silent session resume
   (app)/layout.tsx           server-side session check (GET /auth/me), providers, app shell
-  (app)/dashboard|customers|invoices|receivables|cashflow|scenarios|actions|settings
+  (app)/agent|dashboard|customers|invoices|receivables|cashflow|scenarios|actions|settings
+                             (actions = the Approvals page)
   api/backend/[...path]/     same-origin proxy to the backend
 proxy.ts                     optimistic cookie check -> /login
-components/                  design system, layout, dashboard, customers, invoices, cashflow, charts, voice, actions
-lib/api/                     generated schema types, typed client (CSRF, refresh), query hooks, voice
+components/                  ui (design system), layout, agent (orb, dock, conversation), dashboard, customers,
+                             invoices, cashflow, charts, payments, actions (ProposalCard), auth
+lib/agent/                   live voice engine: mic worklet capture, socket, player, reducer, tab lock, VAD
+lib/api/                     generated schema types, typed client (CSRF, refresh), query hooks
 lib/server/                  env validation, proxy core, server session
 lib/payments/                server-side payment-attempt recovery
 lib/format/                  exact money (BigInt) and date helpers
-hooks/                       recorder (MediaRecorder), debounce
+hooks/                       debounce
 contracts/                   imported backend contract: openapi.json, CONTRACT_VERSION, API_CONTRACT.md
 tests/                       Vitest unit and component tests
 e2e/                         Playwright tests against a real backend
@@ -65,8 +69,11 @@ Browser ──same origin──> /api/backend/api/v1/...  (app/api/backend/[...p
                          KAIRA backend /api/v1/...
 ```
 
-The browser never calls the backend directly, so its HttpOnly session cookies are first-party wherever the backend runs,
-and CORS is not involved.
+For HTTP the browser never calls the backend directly, so its HttpOnly session cookies are first-party wherever the
+backend runs. The one exception is the live voice WebSocket: Next.js route handlers cannot proxy WebSockets, so the
+browser opens the `ws_url` returned by `POST /agent/session` on the backend directly, authenticated by a single-use
+ticket (no cookies). The backend checks the socket's `Origin` against its `CORS_ORIGINS`, so the frontend's origin
+must be listed there, and `AGENT_PUBLIC_WS_URL` must be reachable from the browser.
 
 - Only `api/v1/...` paths are forwarded. `/docs` and `/openapi.json` are not reachable through the proxy. Malformed
   encodings get `400 BAD_REQUEST_PATH`, and paths are never decoded twice.
@@ -120,14 +127,14 @@ every place the UI must change.
 
 | Suite | Command | Covers |
 |---|---|---|
-| Unit and component (Vitest) | `npm test` | Proxy (headers, multipart, cookies, path rules, timeouts); API client (envelope, CSRF, refresh, idempotency); voice upload and audio decoding; money and date formatting; proposal review, approve, reject and edit; forms; payment recovery (lost responses, reload, another device, two tabs, pending visibility, logout privacy); the contract script |
-| End to end (Playwright) | `E2E_EMAIL=… E2E_PASSWORD=… npm run test:e2e` | Production build against a **real backend** and PostgreSQL: auth and protected routes, HttpOnly cookies, refresh, CSRF refusal, invoice → payment → receivables, assistant reject/edit/approve with backend checks, voice recording with a fake microphone, forecast, non-mutating what-if, mobile layout |
+| Unit and component (Vitest) | `npm test` | Proxy (headers, multipart, cookies, path rules, timeouts); API client (envelope, CSRF, refresh, idempotency); agent engine (socket and reconnects, tab lock, reducer, buffers, PCM, provider); money and date formatting; ProposalCard review, approve, reject and edit; screens and forms; payment recovery (lost responses, reload, another device, two tabs, pending visibility, logout privacy); the contract script |
+| End to end (Playwright) | `E2E_EMAIL=… E2E_PASSWORD=… npm run test:e2e` | Production build against a **real backend** and PostgreSQL: auth and protected routes, refresh, CSRF refusal, invoice → payment → receivables, proposal reject/edit/approve on Approvals with backend checks, the live-session toggle and status, forecast, non-mutating what-if, mobile layout |
+| Live agent (opt-in) | `E2E_LIVE_AGENT=1 …` | Typed requests to KAIRA (payment and promise, questions, reminder drafts). Needs a backend with `SARVAM_API_KEY`; skipped otherwise |
 | Payment recovery (opt-in) | `E2E_DISPOSABLE_BACKEND=1 E2E_STAFF_EMAIL=… E2E_STAFF_PASSWORD=… npx playwright test e2e/payment-recovery.spec.ts` | Lost response then reload, browser restart, two tabs, cross-device, for invoices and bills |
-| Acceptance (opt-in) | `RUN_ACCEPTANCE=1 … npx playwright test e2e/acceptance.spec.ts` | The full Ramesh demo. **Records a real ₹5,000 payment**; skips itself if Ramesh owes ₹5,000 or less |
+| Acceptance (opt-in) | `RUN_ACCEPTANCE=1 E2E_LIVE_AGENT=1 … npx playwright test e2e/acceptance.spec.ts` | The full Ramesh demo through the agent. **Records a real ₹5,000 payment**; skips itself if Ramesh owes ₹5,000 or less |
 
-E2E creates uniquely named customers, so it can be repeated, but point it only at a disposable backend. The voice test
-uses a fixed 440 Hz tone as a fake microphone. That is simulated audio: it proves the recording pipeline, not live
-Sarvam transcription.
+E2E creates uniquely named customers, so it can be repeated, but point it only at a disposable backend. No E2E test
+speaks into a microphone: live speech recognition is not covered by Playwright.
 
 ## Docker and deployment
 
@@ -136,30 +143,35 @@ Sarvam transcription.
 - `Dockerfile`: multi-stage, Node 22 Alpine, non-root user, health check on `/login`. `BACKEND_ORIGIN` is read at
   runtime, so one image works everywhere:
   `docker build -t kaira-frontend . && docker run -p 3000:3000 -e BACKEND_ORIGIN=http://<backend>:8000 kaira-frontend`.
-- `.github/workflows/ci.yml`: env template check, contract check, lint, typecheck, unit tests, build,
-  `npm audit --omit=dev`, Docker build. The Playwright job runs only when `vars.E2E_BACKEND_ORIGIN` and the
-  `E2E_EMAIL`/`E2E_PASSWORD` secrets point at a disposable backend.
+- CI is at the repository root: `.github/workflows/frontend.yml` (env template check, contract check, lint,
+  typecheck, unit tests, build, `npm audit --omit=dev`, Docker build; a staging Playwright job only when
+  `vars.E2E_BACKEND_ORIGIN` is set) and `.github/workflows/e2e.yml` (Playwright against a backend and PostgreSQL
+  started inside the job, no secrets). `full-suite.yml` runs both plus the backend checks on demand.
 - Production: serve the frontend and backend over HTTPS, with backend `COOKIE_SECURE=true`. Set `BACKEND_ORIGIN` as a
   server variable, and check with `node scripts/check-env.mjs --connect`.
 
-No hosting provider has been chosen. **Nothing has been deployed.**
+The free-tier target is Vercel (root directory `kaira-frontend`, `BACKEND_ORIGIN=https://<your-render-service>.onrender.com`
+as a server-side variable) in front of the backend on Render. The backend must list the Vercel origin in
+`CORS_ORIGINS` and set `AGENT_PUBLIC_WS_URL` to its public `wss://` address for live voice. Details:
+[`../backend/docs/DEPLOYMENT.md`](../backend/docs/DEPLOYMENT.md).
 
-## Verification status (22 Nov 2026)
+## Verification status
+
+The project-wide status is in the root `README.md`. For the frontend:
 
 | Check | Result |
 |---|---|
-| Lint, typecheck | 0 problems |
-| Unit and component tests | 122 passed |
-| Production build | succeeds |
-| Contract | identical to the backend's `docs/openapi.json` (API 1.1.0, 43 paths); every endpoint the UI calls exists |
-| Playwright | 18/18 against a disposable backend, including acceptance and cross-device recovery |
-| Docker | image builds and runs as non-root; proxied login, CSRF refusal and path hardening checked live |
-| GitHub Actions | passes (the e2e job is skipped without a configured disposable backend) |
-| Live Sarvam voice | **not tested** (no key). Without a key the UI shows "Voice is not available on this server yet" and typed English input works |
+| Lint, typecheck, unit and component tests, production build | run by `frontend-ci` on every relevant push and PR |
+| Contract | `contracts/openapi.json` is identical to the backend's `docs/openapi.json` (API 1.2.0, 47 paths; `contracts/CONTRACT_VERSION`) |
+| Playwright | run by `e2e.yml` against a seeded backend; tests that need the live agent LLM are skipped there |
+| Live voice in a browser | Not yet verified with a human speaking into a microphone. The backend pipeline was exercised with Sarvam-synthesized loopback speech |
 
 ## Known limitations
 
-- Live speech-to-text, Telugu/Hindi understanding and spoken answers need `SARVAM_API_KEY` on the backend.
+- Live voice, the agent LLM, and Telugu/Hindi understanding need `SARVAM_API_KEY` on the backend. Without it the
+  live session reports that voice is not configured.
+- The browser listens only while the page is open, the live session is on and microphone permission is granted. Only
+  one tab per browser profile holds the live session (Web Locks); other tabs keep typed input.
 - Behind the proxy, every login comes from the frontend server's IP, so the backend's per-IP login limit is shared.
   The per-e-mail limit still applies.
 - Browsers without the Web Locks API could race two refreshes, which triggers the backend's reuse protection and

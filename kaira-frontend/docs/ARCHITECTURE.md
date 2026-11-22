@@ -8,15 +8,19 @@ app/
   layout.tsx                 fonts (next/font: Manrope, Fraunces), global CSS
   login/                     sign-in + silent session resume
   (app)/layout.tsx           SERVER session check (GET /auth/me), providers, app shell
-  (app)/dashboard|customers|invoices|receivables|cashflow|scenarios|actions|settings
+  (app)/agent|dashboard|customers|invoices|receivables|cashflow|scenarios|actions|settings
+                             (/agent is the landing screen; /actions is the Approvals page)
   api/backend/[...path]/     same-origin proxy to the backend
 proxy.ts                     Next 16 "proxy" (formerly middleware): optimistic cookie check -> /login
-components/                  ui (design system), layout, dashboard, customers, invoices, cashflow, charts,
-                             voice (orb, assistant), actions (proposal review), auth
-lib/api/                     schema.d.ts (generated), types, client (CSRF/refresh), hooks (queries/mutations), voice
+components/                  ui (design system), layout, agent (provider, home, orb, dock, conversation, activity),
+                             dashboard, customers, invoices, cashflow, charts, payments, actions (ProposalCard), auth
+lib/agent/                   live voice engine: engine, socket, mic + worklet, player, reducer, protocol, tab lock,
+                             VAD, ring buffers
+lib/api/                     schema.d.ts (generated), types, client (CSRF/refresh), hooks (queries/mutations)
+lib/payments/                server-side payment-attempt recovery
 lib/server/                  env validation, proxy core, server session
 lib/format/                  exact money (BigInt) and date helpers
-hooks/                       recorder (MediaRecorder), debounce
+hooks/                       debounce
 contracts/                   imported backend contract + version record
 ```
 
@@ -37,8 +41,12 @@ contracts/                   imported backend contract + version record
 * **Roles.** Approve/reject and business settings are hidden for staff. The backend still enforces them (`403 FORBIDDEN`).
 * **Headers.** `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, `Permissions-Policy: microphone=(self)`;
   `poweredByHeader` off.
-* **Configuration.** The only server variable is `BACKEND_ORIGIN`. No backend secrets live in the frontend, and
-  `scripts/check-env.mjs` fails if a `NEXT_PUBLIC_*` variable looks like a secret.
+* **Configuration.** Server variables are `BACKEND_ORIGIN` (required), `BACKEND_TIMEOUT_MS` and
+  `TRUSTED_CLIENT_IP_HEADER`. No backend secrets live in the frontend, and `scripts/check-env.mjs` fails if a
+  `NEXT_PUBLIC_*` variable looks like a secret.
+* **Live WebSocket.** The one connection that bypasses the proxy: the browser opens the backend's `ws_url` directly
+  with a single-use ticket from `POST /agent/session` (no cookies). The backend checks its `Origin` against
+  `CORS_ORIGINS`.
 
 ## Data layer
 
@@ -50,7 +58,7 @@ contracts/                   imported backend contract + version record
   ledger-derived view (dashboard, insights, customers, invoices, receivables, forecast, bills, commitments, audit).
   Customer edits only refresh customer data.
 * Payments send an `Idempotency-Key` created once per submission and reused on retry.
-* **Payment recovery: the server is the authority** (backend API 1.1.0, `/payment-attempts`):
+* **Payment recovery: the server is the authority** (`/payment-attempts`, added in backend API 1.1.0):
   * **Shared code.** Bill and invoice payments share `lib/payments/server-attempts.ts` (register, then execute, with
     one outcome classification) and the `usePaymentAttempt` hook.
   * **Register before paying.** A payment first registers an *attempt*; the backend freezes the key and the exact
@@ -86,10 +94,24 @@ layout, so a live session survives navigation:
 
 * The microphone opens only when the user enables the live session (explicit click). An AudioWorklet
   (`public/worklets/kaira-mic-worklet.js`) downmixes and resamples to 16 kHz Int16 PCM in ~100 ms frames, streamed
-  over a WebSocket (`lib/agent/socket.ts`) to the backend, which bridges to Sarvam realtime STT. A short pre-roll and a
-  client energy VAD drive the orb and early local barge-in; recognition is Sarvam's.
-* The WebSocket is authenticated with a 60 s single-use ticket from `POST /agent/session` (Next.js route handlers
-  cannot proxy WebSockets). Reconnects request a fresh ticket.
+  over a WebSocket (`lib/agent/socket.ts`) to the backend, which bridges to Sarvam realtime STT. Audio captured while
+  the socket is connecting or reconnecting goes to a 1.5 s pre-roll buffer and is flushed in order when it opens. A
+  client energy VAD drives the orb and early local barge-in; recognition is Sarvam's.
+* **One live tab.** `lib/agent/tab-lock.ts` holds an exclusive Web Locks lock (`kaira.agent.live-mic`) while a tab
+  streams the microphone; a BroadcastChannel tells other tabs, which show "live voice is active in another tab" and
+  keep typed input. The browser releases the lock when the holding tab closes or crashes. The backend separately
+  ends an older socket of the same user (`SESSION_REPLACED`).
+* **Ticket and reconnects.** The WebSocket is authenticated with a single-use ticket from `POST /agent/session`
+  (Next.js route handlers cannot proxy WebSockets). Every reconnect requests a fresh ticket with
+  `resume_session_id`, with exponential backoff.
+* **Dead sockets and offline.** Every ping (20 s) arms a watchdog: if nothing arrives from the server within 10 s
+  (`PONG_TIMEOUT_MS`) the socket is treated as lost and reconnected. A typed turn sent over the socket triggers an
+  immediate probe. The browser `offline` event drops the socket and pauses reconnect attempts; `online` reconnects at
+  once. Typed turns that were sent over a socket that dropped are resent over `POST /agent/turn` with the same
+  `turn_id`, so the backend replays rather than repeats them.
+* **Levels.** Mic and output levels (~20 Hz) live in a separate small store on the engine
+  (`subscribeLevels`/`getLevels`, read through `useAgentLevels()`), so level updates re-render only the orb, not the
+  page.
 * Replies arrive as PCM frames and are scheduled gaplessly (`lib/agent/player.ts`); `tts.stop` (server barge-in)
   or local speech stops playback instantly.
 * `reduceAgentEvent` (`lib/agent/reducer.ts`) turns server events into the orb state, transcript, activity feed and
@@ -97,13 +119,17 @@ layout, so a live session survives navigation:
 * Typed input (`sendText`) uses the same conversation over the socket, or `POST /agent/turn` without it.
 
 UI: `/agent` (`components/agent/agent-home.tsx`, `kaira-orb.tsx`, `activity-feed.tsx`, `conversation.tsx`) and the
-`AgentDock` on every other page. Operations the agent reads back for confirmation, and staff requests, appear on
-the Approvals page. Proposals (`ProposalCard`) show the transcript, intent, customer/invoice resolution with
-candidates, amounts, computed values (remaining balance, balance after), evidence with "found in transcript", warnings
-(blocking ones highlighted), and confidence. Edit sends the full operation list to `PATCH /actions/{id}`.
-Approve and reject wait for the backend and are disabled while in flight. Success is shown only when the
-returned status is `executed`. When the backend reports `voice_provider: not_configured`, the UI says so and keeps
-typed input working.
+`AgentDock` on every other page.
+
+**Approvals** (`app/(app)/actions/page.tsx`) lists proposed actions from `GET /actions` with status tabs (awaiting
+approval, approved, rejected, all). Proposals reach it from the agent (read-backs waiting for a "yes" and staff
+requests waiting for the owner; owner instructions the agent executed appear as approved) and from the REST
+`POST /assistant/extract` path, which the current UI does not call. Each proposal is a `ProposalCard`
+(`components/actions/proposal-card.tsx`): transcript, intent, customer/invoice resolution with candidates, amounts,
+computed values (remaining balance, balance after), evidence with "found in transcript", warnings (blocking ones
+highlighted) and confidence. Edit sends the full operation list to `PATCH /actions/{id}`. Approve and reject are
+owner-only, wait for the backend and are disabled while in flight. Success is shown only when the returned status is
+`executed`. When the backend reports `voice_provider: not_configured`, the UI says so and keeps typed input working.
 
 ## Design system
 
