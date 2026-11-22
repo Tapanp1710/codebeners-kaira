@@ -341,7 +341,7 @@ class LiveSession:
             turn_id = str(data.get("turn_id") or self._turn_id(text))[:64]
             if turn_id in self.inflight_texts:
                 return  # a resend of a turn this session is already running
-            if not await self._allow_turn():
+            if not await self._allow_turn(turn_id):
                 return
             await self._start_turn(text, None, "text", turn_id)
 
@@ -546,8 +546,12 @@ class LiveSession:
         if was_speaking or reason != "speech":
             await self.send({"type": "tts.stop", "reason": reason})
 
-    async def _allow_turn(self) -> bool:
-        """The same per-user AI limit as the REST endpoints."""
+    async def _allow_turn(self, turn_id: str | None = None) -> bool:
+        """The same per-user AI limit as the REST endpoints.
+
+        ``turn_id`` is the client's id of a refused typed turn: it is echoed in the RATE_LIMITED error so the
+        browser drops that turn instead of keeping it pending (and replaying it later unasked).
+        """
         if self.rate_limiter is None:
             return True
         try:
@@ -555,15 +559,16 @@ class LiveSession:
                 self.rate_limiter.check, f"ai:{self.user_id}", self.settings.RATE_LIMIT_AI_PER_MINUTE
             )
         except Exception:  # noqa: BLE001 - rate limited (or limiter failure): refuse this turn, keep the session
-            await self.send(
-                {
-                    "type": "error",
-                    "source": "session",
-                    "code": "RATE_LIMITED",
-                    "fatal": False,
-                    "message": "Too many requests. Wait a moment.",
-                }
-            )
+            event: dict[str, Any] = {
+                "type": "error",
+                "source": "session",
+                "code": "RATE_LIMITED",
+                "fatal": False,
+                "message": "Too many requests. Wait a moment.",
+            }
+            if turn_id is not None:
+                event["turn_id"] = turn_id
+            await self.send(event)
             return False
         return True
 

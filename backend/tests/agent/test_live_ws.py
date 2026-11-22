@@ -544,6 +544,9 @@ def test_live_turns_share_the_per_user_ai_rate_limit(voice, monkeypatch):
         assert [(e["source"], e["code"], e["fatal"]) for e in errors] == [
             ("session", "RATE_LIMITED", False)
         ] * 2, got
+        # the refused typed turn is named, so the browser drops it instead of replaying it later;
+        # the refused spoken turn has no client turn id
+        assert [e.get("turn_id") for e in errors] == ["rl-2", None], errors
         assert "turn.started" not in types(got)
         assert len(voice.app.state.sarvam.calls) == 2  # only the first turn reached the LLM
         with voice.factory() as s:
