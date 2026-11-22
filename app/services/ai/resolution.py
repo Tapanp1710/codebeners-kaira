@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.models import Customer, Invoice
 from app.schemas.ai import WRITE_INTENTS, Operation
 from app.services import ledger
-from app.services.ai.text_parse import normalise_invoice_number, normalise_text
+from app.services.ai.text_parse import normalise_invoice_number, normalise_text, romanize
 from app.utils.money import ZERO, money_str, q2
 
 VERIFIED_FIELDS = (
@@ -124,7 +124,8 @@ def verify_evidence(transcript: str, op: Operation, index: int, warnings: list[W
 
 # ------------------------------------------------------------------ customers
 def _clean_name(name: str) -> str:
-    tokens = [t for t in re.split(r"[^\w]+", name.casefold()) if t and t not in HONORIFICS]
+    # Indic-script names are romanized first so "రమేష్" / "रमेश" match a customer stored as "Ramesh".
+    tokens = [t for t in re.split(r"[^\w]+", romanize(name).casefold()) if t and t not in HONORIFICS]
     return " ".join(tokens)
 
 

@@ -15,6 +15,8 @@ Rules every tool follows:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -26,7 +28,16 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.exceptions import AppError, BusinessRuleError, NotFoundError, PermissionDeniedError
-from app.models import AuditLog, CashTransaction, Conversation, Customer, Invoice, Payment, ProposedAction
+from app.models import (
+    AgentToolExecution,
+    AuditLog,
+    CashTransaction,
+    Conversation,
+    Customer,
+    Invoice,
+    Payment,
+    ProposedAction,
+)
 from app.schemas.ai import Operation
 from app.services import (
     audit_service,
@@ -39,10 +50,13 @@ from app.services import (
     payment_service,
     receivables_service,
 )
+from app.services.agent.numbers import spoken_amount
 from app.services.ai import action_service
 from app.services.ai.resolution import Analysis, analyse, resolve_customer
+from app.services.ai.text_parse import normalise_text
 from app.utils.money import ZERO, money_str, q2
 
+CORRECTION_PREFIX = "agent-correction:"
 # Soft warnings that still allow autonomous execution of an owner's clear instruction.
 AUTO_OK_WARNINGS = {"DATE_DEFAULTED"}
 
@@ -58,6 +72,7 @@ class ToolContext:
     turn_id: str
     sarvam: Any = None
     events: list[dict[str, Any]] = field(default_factory=list)  # UI side effects (navigate, refresh)
+    known_ids: set[str] = field(default_factory=set)  # ids that appeared in tool results of this conversation
 
 
 @dataclass
@@ -116,7 +131,9 @@ EVIDENCE = {
     "type": "object",
     "description": "For every value you pass, the exact words the user said for it, copied verbatim from the "
     'user\'s speech in its original language/script (e.g. {"amount": "ఐదు వేల", "customer_name": '
-    '"రమేష్", "date": "today"}). Values the user did not say are rejected.',
+    '"రమేష్", "date": "ఈరోజు", "expected_payment_date": "వచ్చే సోమవారం", "remaining_balance": "మిగిలిన"}). '
+    'Use the key "remaining_balance" for the words meaning "the rest / remaining / balance" (e.g. "बाकी", '
+    '"మిగిలిన", "the rest"). Values the user did not say are rejected.',
     "additionalProperties": {"type": "string"},
 }
 CUSTOMER_REF = {
@@ -280,7 +297,7 @@ def get_customer(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         {
             "phone": c.phone,
             "email": c.email,
-            "notes": c.notes,
+            "has_notes": bool(c.notes),
             "recent_payments": [
                 {
                     "payment_id": str(p.id),
@@ -623,12 +640,23 @@ def recent_activity(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     {},
 )
 def pending_confirmations(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    rows, total = action_service.list_actions(
-        ctx.db, ctx.actor.business_id, status="pending", page=1, page_size=10
-    )
+    offered = ctx.db.scalars(
+        select(AgentToolExecution.proposed_action_id).where(
+            AgentToolExecution.business_id == ctx.actor.business_id,
+            AgentToolExecution.user_id == ctx.actor.user_id,
+            AgentToolExecution.status == "needs_confirmation",
+            AgentToolExecution.proposed_action_id.is_not(None),
+        )
+    ).all()
+    rows = [
+        r
+        for r in (ctx.db.get(ProposedAction, aid) for aid in dict.fromkeys(offered))
+        if r is not None and r.status == "pending"
+    ][:10]
     return {
-        "count": total,
+        "count": len(rows),
         "pending": [{"action_id": str(r.id), "summary": _proposal_summary(r)} for r in rows],
+        "note": "Only operations KAIRA read back to you. Others are on the Approvals screen.",
     }
 
 
@@ -744,12 +772,47 @@ def _execute_action(ctx: ToolContext, action: ProposedAction) -> dict[str, Any]:
     return out
 
 
+def proposal_hash(action: ProposedAction) -> str:
+    ops = (action.extracted_data or {}).get("operations", [])
+    return hashlib.sha256(json.dumps(ops, sort_keys=True, default=str).encode()).hexdigest()[:24]
+
+
+def amount_evidenced(amount: Decimal, evidence: dict[str, str], transcript: str | None) -> bool:
+    """True when some evidence fragment the user actually said parses to exactly this amount. The preferred
+    key is "amount", but models also use "correct_amount"/"new_amount"; the key does not matter, the words do."""
+    said_text = normalise_text(transcript or "")
+    fragments = [evidence.get("amount"), *evidence.values()]
+    for frag in fragments:
+        if not frag:
+            continue
+        if transcript is not None and normalise_text(frag) not in said_text:
+            continue
+        if spoken_amount(frag) == q2(amount):
+            return True
+    return False
+
+
+def value_checks(ctx: ToolContext, ops: list[Operation]) -> list[str]:
+    """Reasons to read an operation back instead of executing it, even for the owner in auto mode."""
+    reasons = []
+    for op in ops:
+        if op.amount is not None:
+            if not amount_evidenced(q2(op.amount), op.evidence, ctx.transcript):
+                reasons.append(f"the amount {m(op.amount)} could not be matched exactly to the words spoken")
+        if op.customer_id and not op.customer_name and str(op.customer_id) not in ctx.known_ids:
+            reasons.append("the customer was not named and did not come from an earlier result")
+        if op.items:
+            reasons.append("line items were not dictated item by item")
+    return reasons
+
+
 def run_operations(
     ctx: ToolContext, ops: list[Operation], *, needs_confirmation: bool = False
 ) -> dict[str, Any]:
     business = ctx.actor.business
     analysis = analyse(ctx.db, business, ctx.today, ctx.transcript, ops, verify=True)
-    decision = autonomy_decision(ctx, analysis, needs_confirmation)
+    reasons = value_checks(ctx, ops) if analysis.can_approve else []
+    decision = autonomy_decision(ctx, analysis, needs_confirmation or bool(reasons))
     if decision == "clarify":
         return _clarification(analysis)
     conv = Conversation(
@@ -771,7 +834,10 @@ def run_operations(
         "summary": _proposal_summary(action),
         "warnings": [w.message for w in analysis.warnings],
         "computed": [a.computed for a in analysis.operations if a.computed],
+        "proposal_hash": proposal_hash(action),
     }
+    if reasons:
+        preview["confirmation_reasons"] = reasons
     if decision == "owner_approval":
         return {
             "status": "needs_owner_approval",
@@ -788,6 +854,13 @@ def run_operations(
     return {**_execute_action(ctx, action), "summary": preview["summary"]}
 
 
+def _evidence(a: dict[str, Any]) -> dict[str, str]:
+    ev = {k: str(v) for k, v in (a.get("evidence") or {}).items() if v}
+    if "remaining_balance" in ev and "amount_is_remaining" not in ev:
+        ev["amount_is_remaining"] = ev["remaining_balance"]
+    return ev
+
+
 def _op(kind: str, a: dict[str, Any], **extra: Any) -> Operation:
     return Operation(
         type=kind,
@@ -796,7 +869,7 @@ def _op(kind: str, a: dict[str, Any], **extra: Any) -> Operation:
         invoice_reference=a.get("invoice_number"),
         amount=_amount(a.get("amount")),
         date=_date(a.get("date")),
-        evidence={k: str(v) for k, v in (a.get("evidence") or {}).items()},
+        evidence=_evidence(a),
         **extra,
     )
 
@@ -970,7 +1043,7 @@ def record_expense(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         date=_date(a.get("date")),
         due_date=_date(a.get("due_date")),
         payment_method=a.get("payment_method"),
-        evidence={k: str(v) for k, v in (a.get("evidence") or {}).items()},
+        evidence=_evidence(a),
     )
     return run_operations(ctx, [op])
 
@@ -992,7 +1065,7 @@ def create_customer(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
                 customer_name=a.get("customer_name"),
                 phone=a.get("phone"),
                 email=a.get("email"),
-                evidence={k: str(v) for k, v in (a.get("evidence") or {}).items()},
+                evidence=_evidence(a),
             )
         ],
     )
@@ -1012,7 +1085,53 @@ def confirm_pending_action(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
     if not aid:
         return {"status": "needs_clarification", "message": "Which pending operation?"}
     action = action_service.get_action(ctx.db, ctx.actor.business_id, aid)
+    if action.status != "pending":
+        return {
+            "status": "error",
+            "code": "NOT_PENDING",
+            "action_id": str(action.id),
+            "message": f"That operation is already {action.status}; nothing was done.",
+        }
+    # Only an operation KAIRA offered to THIS user for confirmation in a previous turn can be confirmed here;
+    # anything else (another user's proposal, one never read back) goes through the Approvals screen.
+    offer = _offered_for_confirmation(ctx, action_id=action.id)
+    if offer is None:
+        return {
+            "status": "error",
+            "code": "NOT_OFFERED",
+            "message": "I can only confirm an operation I read back to you a moment ago. Nothing was done.",
+        }
+    if (offer.result or {}).get("proposal_hash") != proposal_hash(action):
+        return {
+            "status": "error",
+            "code": "CHANGED_SINCE_READ_BACK",
+            "message": "That operation was changed after I read it back, so I did not run it. Please review it.",
+        }
     return {**_execute_action(ctx, action), "summary": _proposal_summary(action)}
+
+
+def _offered_for_confirmation(
+    ctx: ToolContext,
+    *,
+    action_id: uuid.UUID | None = None,
+    tool: str | None = None,
+    match: Callable[[dict[str, Any]], bool] | None = None,
+    minutes: int = 30,
+) -> AgentToolExecution | None:
+    """The execution of an earlier turn (not this one) of this user that returned needs_confirmation for it."""
+    q = select(AgentToolExecution).where(
+        AgentToolExecution.business_id == ctx.actor.business_id,
+        AgentToolExecution.user_id == ctx.actor.user_id,
+        AgentToolExecution.status == "needs_confirmation",
+        AgentToolExecution.turn_id != ctx.turn_id,
+        AgentToolExecution.created_at >= dt.datetime.now(dt.UTC) - dt.timedelta(minutes=minutes),
+    )
+    if action_id is not None:
+        q = q.where(AgentToolExecution.proposed_action_id == action_id)
+    if tool is not None:
+        q = q.where(AgentToolExecution.tool_name == tool)
+    rows = ctx.db.scalars(q.order_by(AgentToolExecution.created_at.desc()).limit(20)).all()
+    return next((r for r in rows if match is None or match(r.arguments or {})), None)
 
 
 @tool(
@@ -1041,7 +1160,7 @@ def cancel_pending_action(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
         "correct_amount": {"type": "number"},
         "confirmed": {
             "type": "boolean",
-            "description": "true only after the user explicitly confirmed this correction",
+            "description": "true only when the user said yes to the correction you read back in an earlier turn",
         },
         "evidence": EVIDENCE,
     },
@@ -1060,7 +1179,24 @@ def correct_payment_amount(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
     if pay is None:
         return {"status": "needs_clarification", "message": "I could not find that payment."}
     correct = _amount(a.get("correct_amount"))
-    diff = q2(correct - pay.amount)
+    # A correction payment points back at its original through its idempotency key; corrections of the same
+    # payment are summed so "6,000" then "7,000" records 1,000 then 1,000 more, never 2,000.
+    if (pay.idempotency_key or "").startswith(CORRECTION_PREFIX):
+        base_id = _uuid(pay.idempotency_key.split(":")[1])
+        base = ctx.db.scalar(
+            select(Payment).where(Payment.id == base_id, Payment.business_id == ctx.actor.business_id)
+        )
+        pay = base or pay
+    already = q2(
+        ctx.db.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(
+                Payment.business_id == ctx.actor.business_id,
+                Payment.idempotency_key.like(f"{CORRECTION_PREFIX}{pay.id}:%"),
+            )
+        )
+    )
+    recorded_total = q2(pay.amount + already)
+    diff = q2(correct - recorded_total)
     inv = ledger.invoice_balance(ctx.db, ctx.actor.business_id, pay.invoice_id, ctx.today)
     if diff == ZERO:
         return {
@@ -1071,7 +1207,7 @@ def correct_payment_amount(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
     if diff < ZERO:
         return {
             "status": "unsupported",
-            "recorded_amount": m(pay.amount),
+            "recorded_amount": m(recorded_total),
             "correct_amount": m(correct),
             "message": "KAIRA cannot reduce or delete a recorded payment (there is no reversal workflow). "
             "Nothing was changed; the owner must correct it in the books.",
@@ -1082,10 +1218,20 @@ def correct_payment_amount(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
             "message": f"The extra {m(diff)} would exceed the invoice's outstanding "
             f"{m(inv.outstanding)}. Nothing was changed.",
         }
-    if not a.get("confirmed"):
+    # The model's `confirmed` flag alone is not enough: the same correction must have been offered for
+    # confirmation to this user in an earlier turn (so the user actually heard it and said yes).
+    offered = _offered_for_confirmation(
+        ctx,
+        tool="correct_payment_amount",
+        match=lambda args: (
+            _uuid(args.get("payment_id")) == pay.id and _amount(args.get("correct_amount")) == correct
+        ),
+    )
+    evidenced = amount_evidenced(correct, _evidence(a), ctx.transcript)
+    if not a.get("confirmed") or offered is None or not evidenced:
         return {
             "status": "needs_confirmation",
-            "recorded_amount": m(pay.amount),
+            "recorded_amount": m(recorded_total),
             "correct_amount": m(correct),
             "difference_to_record": m(diff),
             "invoice": inv.invoice.invoice_number,
@@ -1099,7 +1245,7 @@ def correct_payment_amount(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
         payment_date=pay.payment_date,
         payment_method=pay.payment_method,
         notes=f"Correction of payment {pay.id}: total {m(correct)}",
-        idempotency_key=f"agent-correction:{pay.id}:{m(correct)}",
+        idempotency_key=f"{CORRECTION_PREFIX}{pay.id}:{m(correct)}",
     )
     after = ledger.invoice_balance(ctx.db, ctx.actor.business_id, pay.invoice_id, ctx.today)
     return {

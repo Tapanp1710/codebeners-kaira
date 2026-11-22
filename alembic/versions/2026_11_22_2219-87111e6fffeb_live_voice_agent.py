@@ -86,6 +86,13 @@ def upgrade() -> None:
             ["user_id"], ["users.id"], name=op.f("fk_agent_messages_user_id_users"), ondelete="SET NULL"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_agent_messages")),
+        sa.UniqueConstraint(
+            "business_id",
+            "user_id",
+            "turn_id",
+            "role",
+            name=op.f("uq_agent_messages_business_id_user_id_turn_id_role"),
+        ),
     )
     op.create_index(op.f("ix_agent_messages_business_id"), "agent_messages", ["business_id"], unique=False)
     op.create_index(op.f("ix_agent_messages_turn_id"), "agent_messages", ["turn_id"], unique=False)

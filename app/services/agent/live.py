@@ -30,6 +30,9 @@ from app.models import AgentSession, Customer
 from app.services.agent import orchestrator
 
 logger = logging.getLogger(__name__)
+BYTES_PER_SECOND = 32000  # 16 kHz mono Int16
+MAX_FRAME_BYTES = BYTES_PER_SECOND  # 1 s
+PACING_SLACK_SECONDS = 10
 SENTENCE = re.compile(r"(?<=[.!?।॥])\s+")
 
 
@@ -69,6 +72,9 @@ class LiveSession:
         self.keyterms: list[str] = []
         self.speech_started_at: float | None = None
         self.loop = asyncio.get_running_loop()
+        self.rate_limiter = getattr(app_state, "rate_limiter", None)
+        self.started_at = time.monotonic()
+        self.audio_bytes_in = 0  # for pacing: audio may not arrive faster than real time
 
     # ------------------------------------------------------------------ io
     async def send(self, payload: dict[str, Any] | bytes) -> None:
@@ -149,9 +155,36 @@ class LiveSession:
             if msg.get("type") == "websocket.disconnect":
                 return
             if msg.get("bytes") is not None:
+                frame = msg["bytes"]
+                if len(frame) > MAX_FRAME_BYTES:
+                    await self.send(
+                        {
+                            "type": "error",
+                            "source": "client",
+                            "code": "FRAME_TOO_LARGE",
+                            "message": "Audio frames must be at most 1 s of 16 kHz PCM.",
+                            "fatal": False,
+                        }
+                    )
+                    continue
+                self.audio_bytes_in += len(frame)
+                elapsed = time.monotonic() - self.started_at
+                if self.audio_bytes_in / BYTES_PER_SECOND > elapsed + PACING_SLACK_SECONDS:
+                    continue  # faster than real time: dropped (bounds billed STT audio)
+                if elapsed > self.settings.AGENT_MAX_SESSION_MINUTES * 60:
+                    await self.send(
+                        {
+                            "type": "error",
+                            "source": "session",
+                            "code": "SESSION_TOO_LONG",
+                            "message": "The live session reached its time limit. Start it again.",
+                            "fatal": True,
+                        }
+                    )
+                    return
                 if not self.muted and self.stt is not None and self.stt_ready.is_set():
                     try:
-                        await self.stt.send_pcm(msg["bytes"])
+                        await self.stt.send_pcm(frame)
                     except Exception:  # noqa: BLE001 - the STT loop reconnects
                         self.stt_ready.clear()
                 continue
@@ -173,6 +206,8 @@ class LiveSession:
             elif kind == "ping":
                 await self.send({"type": "pong"})
             elif kind == "text" and str(data.get("text", "")).strip():
+                if not await self._allow_turn():
+                    continue
                 turn_id = str(data.get("turn_id") or self._turn_id(data["text"]))[:64]
                 await self._start_turn(str(data["text"])[:1000], None, "text", turn_id)
 
@@ -199,7 +234,7 @@ class LiveSession:
                 attempt += 1
                 await asyncio.sleep(min(8, 0.5 * 2**attempt))
                 continue
-            attempt = 0
+            connected_at = time.monotonic()
             self.stt_ready.set()
             await self.send(
                 {"type": "status", "stt": "connected", "listening": not self.muted, "muted": self.muted}
@@ -231,7 +266,19 @@ class LiveSession:
                     }
                 )
                 return
-            attempt += 1
+            # A connection that lived a while resets the budget; quick repeated drops stop after a few tries.
+            attempt = 0 if time.monotonic() - connected_at > 30 else attempt + 1
+            if attempt > 5:
+                await self.send(
+                    {
+                        "type": "error",
+                        "source": "stt",
+                        "code": "STT_UNSTABLE",
+                        "fatal": True,
+                        "message": "Live transcription keeps disconnecting. Typed input still works.",
+                    }
+                )
+                return
             await asyncio.sleep(min(8, 0.5 * 2**attempt))
 
     async def _stt_keepalive(self) -> None:
@@ -283,7 +330,8 @@ class LiveSession:
                     "language_confidence": ev.get("language_confidence"),
                 }
             )
-            await self._start_turn(text, ev.get("language"), "voice", self._turn_id(text))
+            if await self._allow_turn():
+                await self._start_turn(text, ev.get("language"), "voice", self._turn_id(text))
         elif kind == "error":
             self.provider_errors += 1
             await self.send(
@@ -316,14 +364,40 @@ class LiveSession:
         self.speaking_until = time.perf_counter()
         await self.send({"type": "tts.stop", "reason": reason})
 
+    async def _allow_turn(self) -> bool:
+        """The same per-user AI limit as the REST endpoints."""
+        if self.rate_limiter is None:
+            return True
+        try:
+            await asyncio.to_thread(
+                self.rate_limiter.check, f"ai:{self.user_id}", self.settings.RATE_LIMIT_AI_PER_MINUTE
+            )
+        except Exception:  # noqa: BLE001 - rate limited (or limiter failure): refuse this turn, keep the session
+            await self.send(
+                {
+                    "type": "error",
+                    "source": "session",
+                    "code": "RATE_LIMITED",
+                    "fatal": False,
+                    "message": "Too many requests. Wait a moment.",
+                }
+            )
+            return False
+        return True
+
     async def _start_turn(self, text: str, language: str | None, mode: str, turn_id: str) -> None:
         await self._barge_in("new_turn")
         for tid in list(self.cancel_turn):
-            self.cancel_turn[tid] = True  # an older turn stops before its next step; finished writes stay
+            self.cancel_turn[tid] = True  # an older turn stops before its next step or write
         self.cancel_turn[turn_id] = False
         utterance_end = time.perf_counter()
+        previous = self.turn_task
 
         async def runner() -> None:
+            # One turn at a time per session: the cancelled predecessor winds down first.
+            if previous is not None and not previous.done():
+                with contextlib.suppress(Exception):
+                    await previous
             try:
                 result = await asyncio.to_thread(
                     orchestrator.run_turn,

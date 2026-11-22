@@ -54,7 +54,11 @@ class AgentMessage(UUIDPrimaryKey, CreatedAt, Base):
     # role=tool: {"name", "arguments", "result"}; role=assistant: {"tool_calls": [...]} when it called tools.
     data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    __table_args__ = (CheckConstraint("role IN ('user', 'assistant', 'tool')", name="role_valid"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant', 'tool')", name="role_valid"),
+        # One user message and one reply per turn: concurrent duplicates of a turn cannot both run.
+        UniqueConstraint("business_id", "user_id", "turn_id", "role"),
+    )
 
 
 class AgentToolExecution(UUIDPrimaryKey, Timestamps, Base):

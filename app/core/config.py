@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     AGENT_TURN_TIMEOUT_SECONDS: float = 60.0
     AGENT_HISTORY_MESSAGES: int = 16
     AGENT_TICKET_TTL_SECONDS: int = 60
+    AGENT_MAX_SESSION_MINUTES: int = 120
     # auto: clear, complete, owner-issued instructions execute without a confirmation step;
     # confirm: every write waits for a spoken/typed "yes". Staff writes always wait for the owner.
     AGENT_AUTONOMY: Literal["auto", "confirm"] = "auto"

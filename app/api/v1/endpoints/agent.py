@@ -10,6 +10,7 @@ GET  /agent/sessions/{id}  usage of one session (billed STT seconds, TTS charact
 from __future__ import annotations
 
 import secrets
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,13 +22,27 @@ from sqlalchemy import select
 
 from app.core.exceptions import NotFoundError
 from app.db.dependencies import Auth, DbSession, SettingsDep
-from app.models import AgentSession
+from app.models import AgentSession, User
 from app.schemas.common import Envelope, ok
 from app.services.agent import orchestrator
 from app.services.agent.live import LiveSession
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 TICKET_TYPE = "agent_ws"
+TICKET_AUDIENCE = "kaira-agent-ws"
+# Single-use tickets: a jti is accepted once per process (each live socket asks for a fresh ticket). With several
+# workers a ticket could at most be used once per worker within its 60 s lifetime.
+_used_tickets: dict[str, float] = {}
+
+
+def _consume_ticket(jti: str, exp: float) -> bool:
+    now = time.time()
+    for k in [k for k, e in _used_tickets.items() if e < now]:
+        _used_tickets.pop(k, None)
+    if jti in _used_tickets:
+        return False
+    _used_tickets[jti] = exp
+    return True
 
 
 class AgentSessionStart(BaseModel):
@@ -60,7 +75,9 @@ class AgentTurnOut(BaseModel):
     events: list[dict[str, Any]]
 
 
-@router.post("/session", response_model=Envelope[AgentSessionOut], summary="Start or resume a live voice session")
+@router.post(
+    "/session", response_model=Envelope[AgentSessionOut], summary="Start or resume a live voice session"
+)
 def start_session(body: AgentSessionStart, request: Request, ctx: Auth, db: DbSession, settings: SettingsDep):
     request.app.state.rate_limiter.check(f"ai:{ctx.user_id}", settings.RATE_LIMIT_AI_PER_MINUTE)
     session = None
@@ -84,7 +101,8 @@ def start_session(body: AgentSessionStart, request: Request, ctx: Auth, db: DbSe
             "sub": str(ctx.user_id),
             "bid": str(ctx.business_id),
             "sid": str(session.id),
-            "jti": secrets.token_hex(8),
+            "jti": secrets.token_hex(12),
+            "aud": TICKET_AUDIENCE,
             "exp": exp,
         },
         settings.JWT_SECRET_KEY,
@@ -111,7 +129,12 @@ async def live(ws: WebSocket):
         await ws.close(code=1008, reason="origin not allowed")
         return
     try:
-        claims = jwt.decode(ws.query_params.get("ticket", ""), settings.JWT_SECRET_KEY, algorithms=["HS256"])
+        claims = jwt.decode(
+            ws.query_params.get("ticket", ""),
+            settings.JWT_SECRET_KEY,
+            algorithms=["HS256"],
+            audience=TICKET_AUDIENCE,
+        )
         if claims.get("typ") != TICKET_TYPE:
             raise jwt.InvalidTokenError("wrong ticket type")
         user_id, business_id, session_id = (
@@ -119,8 +142,17 @@ async def live(ws: WebSocket):
             uuid.UUID(claims["bid"]),
             uuid.UUID(claims["sid"]),
         )
+        if not _consume_ticket(str(claims["jti"]), float(claims["exp"])):
+            raise jwt.InvalidTokenError("ticket already used")
     except (jwt.PyJWTError, KeyError, ValueError):
         await ws.close(code=1008, reason="invalid or expired ticket")
+        return
+    # The user may have been deactivated or moved since the ticket was issued.
+    with ws.app.state.session_factory() as db:
+        user = db.get(User, user_id)
+        active = user is not None and user.is_active and user.business_id == business_id
+    if not active:
+        await ws.close(code=1008, reason="user no longer active")
         return
     await ws.accept()
     if not settings.sarvam_configured:

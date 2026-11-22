@@ -192,3 +192,127 @@ def normalise_invoice_number(ref: str) -> str:
 
 def normalise_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+# ------------------------------------------------------------------ Indic names -> Latin (for matching only)
+# Telugu (U+0C00..) and Devanagari (U+0900..) share the same letter layout at the same offsets, so one table
+# covers both. This is a matching aid, not a transliteration standard: "రమేష్" / "रमेश" -> "ramesh", which then
+# fuzzy-matches a customer stored as "Ramesh Kumar". Long vowels are collapsed (aa -> a) on purpose.
+_INDIC_BASES = (0x0900, 0x0C00)
+_INDEP_VOWELS = {
+    0x05: "a",
+    0x06: "a",
+    0x07: "i",
+    0x08: "i",
+    0x09: "u",
+    0x0A: "u",
+    0x0B: "ri",
+    0x0E: "e",
+    0x0F: "e",
+    0x10: "ai",
+    0x12: "o",
+    0x13: "o",
+    0x14: "au",
+}
+_CONSONANTS = {
+    0x15: "k",
+    0x16: "kh",
+    0x17: "g",
+    0x18: "gh",
+    0x19: "n",
+    0x1A: "ch",
+    0x1B: "chh",
+    0x1C: "j",
+    0x1D: "jh",
+    0x1E: "n",
+    0x1F: "t",
+    0x20: "th",
+    0x21: "d",
+    0x22: "dh",
+    0x23: "n",
+    0x24: "t",
+    0x25: "th",
+    0x26: "d",
+    0x27: "dh",
+    0x28: "n",
+    0x2A: "p",
+    0x2B: "ph",
+    0x2C: "b",
+    0x2D: "bh",
+    0x2E: "m",
+    0x2F: "y",
+    0x30: "r",
+    0x31: "r",
+    0x32: "l",
+    0x33: "l",
+    0x35: "v",
+    0x36: "sh",
+    0x37: "sh",
+    0x38: "s",
+    0x39: "h",
+}
+_MATRAS = {
+    0x3E: "a",
+    0x3F: "i",
+    0x40: "i",
+    0x41: "u",
+    0x42: "u",
+    0x43: "ri",
+    0x46: "e",
+    0x47: "e",
+    0x48: "ai",
+    0x4A: "o",
+    0x4B: "o",
+    0x4C: "au",
+}
+_VIRAMA, _ANUSVARA, _CANDRABINDU, _VISARGA, _NUKTA = 0x4D, 0x02, 0x01, 0x03, 0x3C
+
+
+def _indic_offset(ch: str) -> int | None:
+    cp = ord(ch)
+    for base in _INDIC_BASES:
+        if base <= cp < base + 0x80:
+            return cp - base
+    return None
+
+
+def romanize(text: str) -> str:
+    """Approximate Latin spelling of Telugu/Devanagari text; other characters pass through unchanged."""
+    out: list[str] = []
+    pending_a = False  # a consonant was written and still carries its inherent 'a'
+    for ch in text:
+        off = _indic_offset(ch)
+        if off is None:
+            if pending_a and not ch.isalnum():
+                pass  # word-final schwa deletion: "रमेश" -> "ramesh", not "ramesha"
+            elif pending_a:
+                out.append("a")
+            pending_a = False
+            out.append(ch)
+            continue
+        if off in _CONSONANTS:
+            if pending_a:
+                out.append("a")
+            out.append(_CONSONANTS[off])
+            pending_a = True
+        elif off in _MATRAS:
+            out.append(_MATRAS[off])
+            pending_a = False
+        elif off == _VIRAMA:
+            pending_a = False
+        elif off in _INDEP_VOWELS:
+            if pending_a:
+                out.append("a")
+            out.append(_INDEP_VOWELS[off])
+            pending_a = False
+        elif off in (_ANUSVARA, _CANDRABINDU):
+            if pending_a:
+                out.append("a")
+            out.append("n")
+            pending_a = False
+        elif off == _VISARGA:
+            out.append("h")
+            pending_a = False
+        elif off == _NUKTA:
+            continue
+    return "".join(out)

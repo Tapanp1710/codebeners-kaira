@@ -113,9 +113,10 @@ def _history(db: Session, business_id: UUID, user_id: UUID, limit: int) -> list[
             AgentMessage.role.in_(("user", "assistant")),
         )
         .order_by(AgentMessage.created_at.desc())
-        .limit(limit)
+        .limit(limit * 2)
     ).all()
-    return list(reversed(rows))
+    kept = [r for r in rows if not (r.data or {}).get("ignored")][:limit]
+    return list(reversed(kept))
 
 
 def _brief(result: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +143,19 @@ def _brief(result: dict[str, Any]) -> dict[str, Any]:
     return keep
 
 
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+SUCCESS_CLAIM = re.compile(
+    r"\b(i(?:'ve| have)? (?:recorded|created|added|updated|saved|marked)|has been (?:recorded|created|added|"
+    r"updated|saved)|was (?:recorded|created|added|updated|saved)|is (?:now )?recorded|done)\b"
+    r"|दर्ज कर|दर्ज हो|बना दिया|రికార్డ్ చేశ|నమోదు చేశ|సృష్టించా",
+    re.IGNORECASE,
+)
+
+
+def claims_success(reply: str) -> bool:
+    return bool(SUCCESS_CLAIM.search(reply or ""))
+
+
 def _money_tokens(text: str) -> set[str]:
     return {t.replace(",", "") for t in re.findall(r"\d[\d,]*(?:\.\d+)?", text or "")}
 
@@ -166,7 +180,38 @@ def _fallback_reply(tool_runs: list[dict[str, Any]], language: str) -> str:
             parts.append(str(res["summary"]))
         elif res.get("message"):
             parts.append(str(res["message"]))
-    return " ".join(parts) or "I could not verify those figures, so please check the screen."
+    return " ".join(parts) or UNVERIFIED.get(language, UNVERIFIED["en-IN"])
+
+
+NUDGE = (
+    "(System check, not the user: no write tool has completed in this turn, so nothing has been recorded yet. "
+    "If the user asked you to record something, call the right tool now. Otherwise answer without saying that "
+    "anything was recorded, created or updated.)"
+)
+NOTHING_RECORDED = {
+    "en-IN": "I have not recorded anything yet. Please say it once more with the customer and the amount.",
+    "hi-IN": "मैंने अभी कुछ भी दर्ज नहीं किया है। कृपया ग्राहक और रकम के साथ फिर से बताइए।",
+    "te-IN": "నేను ఇంకా ఏదీ నమోదు చేయలేదు. దయచేసి కస్టమర్ పేరు, మొత్తంతో మళ్లీ చెప్పండి.",
+}
+UNVERIFIED = {
+    "en-IN": "I could not verify those figures, so please check the screen.",
+    "hi-IN": "मैं उन आंकड़ों की पुष्टि नहीं कर सका, कृपया स्क्रीन देखें।",
+    "te-IN": "ఆ సంఖ్యలను నేను నిర్ధారించలేకపోయాను, దయచేసి స్క్రీన్ చూడండి.",
+}
+
+
+def _write_completed(tool_runs: list[dict[str, Any]]) -> bool:
+    return any(
+        r["result"].get("status") == "completed"
+        and toolset.REGISTRY.get(r["tool"]) is not None
+        and toolset.REGISTRY[r["tool"]].kind == "write"
+        for r in tool_runs
+    )
+
+
+def _claims_new_change(reply: str) -> bool:
+    """A question or a read-back ("shall I record...?") is not a claim of success."""
+    return not reply.rstrip().endswith(("?", "？"))
 
 
 def _exec_tool(
@@ -180,13 +225,14 @@ def _exec_tool(
     args: dict[str, Any],
     transcript: str,
     language: str,
+    known_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     kind = toolset.REGISTRY[name].kind if name in toolset.REGISTRY else "read"
-    digest = hashlib.sha256(
-        json.dumps(args, sort_keys=True, ensure_ascii=False, default=str).encode()
-    ).hexdigest()[:20]
-    key = f"{turn_id}:{name}:{digest}"
     started = time.perf_counter()
+    if kind == "read":
+        key = f"{user_id}:{turn_id}:{name}:read:{time.time_ns()}"  # reads are safe to repeat; never replayed
+    else:
+        key = f"{user_id}:{turn_id}:{name}:{operation_digest(args)}"
     with factory() as db:
         existing = db.scalar(
             select(AgentToolExecution).where(
@@ -205,6 +251,7 @@ def _exec_tool(
             language=language,
             turn_id=turn_id,
             sarvam=sarvam,
+            known_ids=set(known_ids or ()),
         )
         execution = AgentToolExecution(
             business_id=business_id,
@@ -275,12 +322,44 @@ def _exec_tool(
                 execution.proposed_action_id = UUID(str(result["action_id"]))
             except ValueError:
                 pass
-        execution.result = json.loads(json.dumps(result, default=str))
+        full = json.loads(json.dumps(result, default=str))
+        # Read results can hold customer PII; only their status is kept. Write results are kept for replay.
+        execution.result = full if kind == "write" else {"status": full.get("status", "completed")}
         execution.duration_ms = int((time.perf_counter() - started) * 1000)
-        if ctx.events:
-            execution.result["_events"] = ctx.events
         db.commit()
-        return {**execution.result, "_execution_id": str(execution.id)}
+        return {**full, "_events": ctx.events, "_execution_id": str(execution.id)}
+
+
+def operation_digest(args: dict[str, Any]) -> str:
+    """What the operation does, not how the model phrased it: evidence and free text are excluded, so a
+    regenerated call for the same payment maps to the same key."""
+    free_text = {"evidence", "notes", "note", "description"}
+
+    def norm(v: Any) -> Any:
+        if isinstance(v, str):
+            return " ".join(v.casefold().split())
+        if isinstance(v, float) and v.is_integer():
+            return int(v)
+        if isinstance(v, dict):
+            return {k: norm(x) for k, x in sorted(v.items()) if k not in free_text}
+        if isinstance(v, list):
+            return [norm(x) for x in v]
+        return v
+
+    return hashlib.sha256(
+        json.dumps(norm(args), sort_keys=True, ensure_ascii=False, default=str).encode()
+    ).hexdigest()[:24]
+
+
+def _stored_reply(db: Session, business_id: UUID, user_id: UUID, turn_id: str) -> AgentMessage | None:
+    return db.scalar(
+        select(AgentMessage).where(
+            AgentMessage.business_id == business_id,
+            AgentMessage.user_id == user_id,
+            AgentMessage.turn_id == turn_id,
+            AgentMessage.role == "assistant",
+        )
+    )
 
 
 def run_turn(
@@ -302,13 +381,7 @@ def run_turn(
     text = text.strip()
     language = detect_language(text, language_hint)
     with factory() as db:
-        prior = db.scalar(
-            select(AgentMessage).where(
-                AgentMessage.business_id == business_id,
-                AgentMessage.turn_id == turn_id,
-                AgentMessage.role == "assistant",
-            )
-        )
+        prior = _stored_reply(db, business_id, user_id, turn_id)
         if prior is not None:
             emit(
                 {
@@ -323,27 +396,46 @@ def run_turn(
         actor = _actor(db, user_id, business_id)
         today = business_today(actor.business.timezone)
         history = _history(db, business_id, user_id, settings.AGENT_HISTORY_MESSAGES)
-        if not db.scalar(
-            select(AgentMessage.id).where(
-                AgentMessage.business_id == business_id,
-                AgentMessage.turn_id == turn_id,
-                AgentMessage.role == "user",
-            )
-        ):
-            db.add(
-                AgentMessage(
-                    business_id=business_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    role="user",
-                    content=text,
-                    language=language,
-                    input_mode=input_mode,
-                )
-            )
-            db.commit()
         prompt = system_prompt(actor.business, actor.role, today, language)
+        # Claim the turn atomically (unique business/user/turn/role): a concurrent duplicate - a client resend
+        # while the first request is still running - waits for the stored reply instead of running again.
+        db.add(
+            AgentMessage(
+                business_id=business_id,
+                user_id=user_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                role="user",
+                content=text,
+                language=language,
+                input_mode=input_mode,
+            )
+        )
+        try:
+            db.commit()
+            claimed = True
+        except IntegrityError:
+            db.rollback()
+            claimed = False
+    if not claimed:
+        wait_until = time.perf_counter() + settings.AGENT_TURN_TIMEOUT_SECONDS
+        while time.perf_counter() < wait_until:
+            with factory() as db:
+                prior = _stored_reply(db, business_id, user_id, turn_id)
+            if prior is not None:
+                emit(
+                    {
+                        "type": "reply",
+                        "turn_id": turn_id,
+                        "text": prior.content,
+                        "language": prior.language,
+                        "replayed": True,
+                    }
+                )
+                return TurnResult(turn_id, prior.content, prior.language or language, replayed=True)
+            time.sleep(0.5)
+        emit({"type": "turn.failed", "turn_id": turn_id, "message": "That request is still being processed."})
+        return TurnResult(turn_id, "", language, replayed=True)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
     recent_user_words = []
@@ -361,6 +453,7 @@ def run_turn(
             allowed_text += " " + content
     messages.append({"role": "user", "content": text})
     transcript_window = "\n".join([*recent_user_words[-4:], text])
+    known_ids = set(UUID_RE.findall(allowed_text))
 
     emit({"type": "turn.started", "turn_id": turn_id, "text": text, "language": language})
     tool_runs: list[dict[str, Any]] = []
@@ -368,6 +461,7 @@ def run_turn(
     llm_calls = 0
     deadline = t0 + settings.AGENT_TURN_TIMEOUT_SECONDS
     specs = toolset.specs()
+    nudged = False
     for _step in range(settings.AGENT_MAX_TOOL_STEPS):
         if should_cancel():
             emit({"type": "turn.cancelled", "turn_id": turn_id})
@@ -381,6 +475,12 @@ def run_turn(
         calls = message.get("tool_calls") or []
         if not calls:
             reply = (message.get("content") or "").strip()
+            if claims_success(reply) and not _write_completed(tool_runs) and not nudged:
+                # The model says it did something it did not do. Tell it so once, then let it act or rephrase.
+                nudged = True
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({"role": "user", "content": NUDGE})
+                continue
             break
         call = calls[0]
         name = call["function"]["name"]
@@ -389,6 +489,9 @@ def run_turn(
         except ValueError:
             args = {}
         tool = toolset.REGISTRY.get(name)
+        if tool is not None and tool.kind == "write" and should_cancel():
+            emit({"type": "turn.cancelled", "turn_id": turn_id})
+            return TurnResult(turn_id, "", language, tool_runs=tool_runs, llm_calls=llm_calls)
         emit(
             {
                 "type": "tool.started",
@@ -399,11 +502,22 @@ def run_turn(
             }
         )
         result = _exec_tool(
-            factory, settings, sarvam, user_id, business_id, turn_id, name, args, transcript_window, language
+            factory,
+            settings,
+            sarvam,
+            user_id,
+            business_id,
+            turn_id,
+            name,
+            args,
+            transcript_window,
+            language,
+            known_ids,
         )
         events = result.pop("_events", [])
         tool_runs.append({"tool": name, "arguments": args, "result": result})
         allowed_text += " " + json.dumps(result, ensure_ascii=False, default=str)
+        known_ids |= set(UUID_RE.findall(json.dumps(result, default=str)))
         emit(
             {
                 "type": "tool.completed",
@@ -447,6 +561,14 @@ def run_turn(
         reply = reply or _fallback_reply(tool_runs, language)
 
     ignored = reply.strip() == IGNORE or (reply.strip().startswith(IGNORE) and not tool_runs)
+    if (
+        not ignored
+        and claims_success(reply)
+        and not _write_completed(tool_runs)
+        and _claims_new_change(reply)
+    ):
+        logger.warning("agent reply claimed a change without a completed write; replaced")
+        reply = NOTHING_RECORDED.get(language, NOTHING_RECORDED["en-IN"])
     if not ignored and not verify_reply(reply, allowed_text):
         logger.warning("agent reply contained unverified figures; replaced with tool summaries")
         reply = _fallback_reply(tool_runs, language)
