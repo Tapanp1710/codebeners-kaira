@@ -1,0 +1,32 @@
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import (
+    actions,
+    agent,
+    assistant,
+    auth,
+    bills,
+    business,
+    commitments,
+    customers,
+    finance,
+    health,
+    invoices,
+    payment_attempts,
+    voice,
+)
+
+api_router = APIRouter()
+api_router.include_router(health.router)
+api_router.include_router(auth.router)
+api_router.include_router(business.router)
+api_router.include_router(customers.router)
+api_router.include_router(invoices.router)
+api_router.include_router(bills.router)
+api_router.include_router(payment_attempts.router)
+api_router.include_router(commitments.router)
+api_router.include_router(finance.router)
+api_router.include_router(voice.router)
+api_router.include_router(assistant.router)
+api_router.include_router(actions.router)
+api_router.include_router(agent.router)

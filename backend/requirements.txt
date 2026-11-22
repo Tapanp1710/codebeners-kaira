@@ -1,0 +1,17 @@
+# Runtime dependencies (pinned). Full transitive lock: requirements.lock
+fastapi==0.165.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+SQLAlchemy==2.1.9
+alembic==1.20.1
+psycopg==3.3.9
+psycopg-binary==3.3.9
+pydantic==2.14.4
+pydantic-settings==2.16.3
+httpx==0.28.1
+# Sarvam realtime STT/TTS WebSocket client (imported directly; also pulled in by uvicorn[standard])
+websockets==17.4
+python-multipart==0.0.34
+email-validator==2.4.0
+PyJWT==2.15.1
+argon2-cffi==25.1.0

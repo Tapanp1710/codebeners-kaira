@@ -1,0 +1,23 @@
+# KAIRA backend - production-style compose file.
+# The database is EXTERNAL (managed PostgreSQL). DATABASE_URL must be supplied
+# in .env.production; nothing here falls back to development credentials.
+# Usage: docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+name: kaira-backend-prod
+
+services:
+  api:
+    build: .
+    restart: always
+    env_file:
+      - .env.production
+    environment:
+      APP_ENV: production
+      RUN_MIGRATIONS_ON_START: "false"
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
