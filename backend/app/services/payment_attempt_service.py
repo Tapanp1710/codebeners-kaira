@@ -21,6 +21,13 @@ Guarantees (PostgreSQL-enforced where possible):
   from proof found while holding the attempt row lock and the invoice/bill row lock: a matching payment under
   the key -> succeeded and linked; no payment under the key and no live lease -> cancelled; anything else
   stays pending. Elapsed time alone never cancels anything.
+- Direct payments (POST /invoices/{id}/payments, /bills/{id}/payments and every other caller of
+  payment_service.record_*_payment) respect attempts, under the same invoice/bill row lock: while an attempt
+  for the invoice/bill is pending they are refused with 409 PAYMENT_ATTEMPT_PENDING unless they carry that
+  attempt's own key and exact request, in which case they record (or replay) the payment once and mark the
+  attempt succeeded; a key belonging to a cancelled attempt is refused (409 PAYMENT_ATTEMPT_CANCELLED), one
+  belonging to a rejected attempt gets that attempt's rejection. See `lock_for_direct_payment`,
+  `guard_direct_payment` and `link_direct_payment`.
 
 Lock order everywhere is attempt row, then invoice/bill row (registration takes only the invoice/bill row).
 """
@@ -338,16 +345,19 @@ def execute(db: Session, actor, attempt_id: uuid.UUID, *, lease: timedelta = EXE
         reference=p["reference"],
         idempotency_key=attempt.idempotency_key,
     )
+    # attempt_guard=False: this execution already holds the attempt and drives its transition itself. The
+    # payment path still refuses a key bound to a different request (422 IDEMPOTENCY_KEY_REUSED -> rejected)
+    # and replays a matching payment already recorded under the key (-> succeeded, replayed).
     try:
         with db.begin_nested():
             if attempt.resource_type == "invoice":
                 res = payment_service.record_customer_payment(
-                    db, actor, invoice_id=attempt.resource_id, notes=p["notes"], **kwargs
+                    db, actor, invoice_id=attempt.resource_id, notes=p["notes"], attempt_guard=False, **kwargs
                 )
                 payment_id, created = res.payment.id, res.created
             else:
                 bp, created = payment_service.record_bill_payment(
-                    db, actor, bill_id=attempt.resource_id, **kwargs
+                    db, actor, bill_id=attempt.resource_id, attempt_guard=False, **kwargs
                 )
                 payment_id = bp.id
     except AppError as e:
@@ -395,6 +405,85 @@ def cancel(db: Session, actor, attempt_id: uuid.UUID) -> Outcome:
     _cancel(attempt)
     _audit(db, actor, attempt, "cancelled")
     return Outcome(attempt)
+
+
+# --------------------------------------------------------------------------------------- direct payments
+
+
+def lock_for_direct_payment(db: Session, business_id: uuid.UUID, key: str | None) -> PaymentAttempt | None:
+    """Locks the attempt registered under `key`, if any. The direct payment path calls this *before* it takes
+    the invoice/bill row lock, keeping the attempt -> invoice/bill lock order used everywhere else."""
+    if not key:
+        return None
+    return db.scalar(
+        select(PaymentAttempt)
+        .where(PaymentAttempt.business_id == business_id, PaymentAttempt.idempotency_key == key)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def guard_direct_payment(
+    db: Session,
+    *,
+    business_id: uuid.UUID,
+    resource_type: str,
+    resource_id: uuid.UUID,
+    attempt: PaymentAttempt | None,
+    fingerprint: str,
+) -> None:
+    """Raises unless a direct payment may record now. The caller holds the invoice/bill row lock (and the lock
+    on `attempt`, the attempt registered under the request's key, if any) and has already ruled out an exact
+    replay of a payment recorded under the key.
+
+    - The key belongs to an attempt: the request behaves as that attempt. Cancelled -> 409
+      PAYMENT_ATTEMPT_CANCELLED; a different request -> 422 IDEMPOTENCY_KEY_REUSED; rejected -> its rejection;
+      pending -> may record (the caller then links the payment with `link_direct_payment`).
+    - Otherwise any pending attempt for this invoice/bill blocks it: 409 PAYMENT_ATTEMPT_PENDING with the
+      attempt id, so the pending payment is retried or cancelled first and can never be recorded twice."""
+    if attempt is not None:
+        if attempt.status == "cancelled":
+            raise ConflictError(
+                "This payment was cancelled, so it cannot be recorded with the same key. Start a new payment.",
+                {"attempt_id": str(attempt.id)},
+                code="PAYMENT_ATTEMPT_CANCELLED",
+            )
+        if attempt.request_fingerprint != fingerprint:
+            raise payment_service.key_reused_error()
+        if attempt.status == "rejected":
+            raise AppError(attempt.failure_code or "PAYMENT_REJECTED", attempt.failure_message or "", 422)
+        if attempt.status != "pending":
+            # succeeded always links the payment recorded under the key, which the replay check finds first.
+            raise ConflictError(
+                "A payment was already recorded for this attempt.",
+                {"attempt_id": str(attempt.id)},
+                code="PAYMENT_ALREADY_RECORDED",
+            )
+        return
+    pending = db.scalar(
+        select(PaymentAttempt).where(
+            PaymentAttempt.business_id == business_id,
+            PaymentAttempt.resource_type == resource_type,
+            PaymentAttempt.resource_id == resource_id,
+            PaymentAttempt.status == "pending",
+        )
+    )
+    if pending is not None:
+        raise ConflictError(
+            f"Another payment for this {resource_type} is awaiting confirmation. "
+            "Retry or cancel it under pending payments first.",
+            {"attempt_id": str(pending.id)},
+            code="PAYMENT_ATTEMPT_PENDING",
+        )
+
+
+def link_direct_payment(db: Session, actor, attempt: PaymentAttempt | None, recorded) -> None:
+    """A direct payment recorded (or replayed) under a pending attempt's key settles that attempt, using the
+    reconciler's proof rule: only a payment matching the attempt's exact request is linked."""
+    if attempt is None or attempt.status != "pending" or not _matches(recorded, attempt):
+        return
+    _succeed(attempt, recorded.id)
+    _audit(db, actor, attempt, "succeeded", {"via": "direct_payment"})
 
 
 # ---------------------------------------------------------------------------------------- reconciliation
