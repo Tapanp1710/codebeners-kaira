@@ -115,10 +115,20 @@ def make_business_staff(db, setup):
 
 
 def test_update_customer_appends_notes_and_reports_before_after(setup, db):
+    # A note the user never said ("add a note") is read back, not written (agent-sec: edit values must be grounded
+    # in the current utterance); the same note said in the user's words is written.
     r = setup.call(
         "add_collection_note", {"customer_id": setup.customer_id, "note": "will visit Friday"}, "add a note"
     )
-    assert r["status"] == "completed"
+    assert r["status"] == "needs_confirmation", r
+    db.expire_all()
+    assert "will visit Friday" not in (db.get(Customer, uuid.UUID(setup.customer_id)).notes or "")
+    r = setup.call(
+        "add_collection_note",
+        {"customer_id": setup.customer_id, "note": "will visit Friday"},
+        "add a note for Ramesh: he will visit Friday",
+    )
+    assert r["status"] == "completed", r
     r = setup.call(
         "update_customer",
         {"customer_id": setup.customer_id, "phone": "9876543210", "notes": "prefers UPI"},
@@ -156,7 +166,9 @@ def test_invoice_lookup_accepts_spoken_numbers(setup):
 
 def test_update_invoice_reports_completed_not_payment_status(setup):
     r = setup.call(
-        "update_invoice", {"invoice_number": "INV-0001", "notes": "call before delivery"}, "add note"
+        "update_invoice",
+        {"invoice_number": "INV-0001", "notes": "call before delivery"},
+        "add note on invoice 1: call before delivery",
     )
     assert r["status"] == "completed" and r["payment_status"] == "unpaid", r
 

@@ -56,7 +56,12 @@ from app.services import (
 from app.services.agent import dates as dateres
 from app.services.agent.numbers import spoken_amount
 from app.services.ai import action_service
-from app.services.ai.resolution import Analysis, analyse, resolve_customer
+from app.services.ai.resolution import (
+    Analysis,
+    _clean_name,
+    analyse,
+    resolve_customer,
+)
 from app.services.ai.text_parse import normalise_invoice_number, normalise_text
 from app.utils.money import ZERO, money_str, q2
 
@@ -84,6 +89,9 @@ class ToolContext:
     sarvam: Any = None
     events: list[dict[str, Any]] = field(default_factory=list)  # UI side effects (navigate, refresh)
     known_ids: set[str] = field(default_factory=set)  # ids that appeared in tool results of this conversation
+    # The user's utterance of THIS turn (confirm / cancel / edit values must be grounded in it). None = fall back
+    # to the last line of the transcript window.
+    current_text: str | None = None
 
 
 @dataclass
@@ -226,8 +234,48 @@ class DateDecision:
 
 
 def _latest_utterance(ctx: ToolContext) -> str:
+    if getattr(ctx, "current_text", None) is not None:
+        return ctx.current_text or ""
     lines = [ln for ln in (ctx.transcript or "").splitlines() if ln.strip()]
     return lines[-1] if lines else ""
+
+
+# --------------------------------------------------------------------------- what the user said this turn
+_PUNCT = re.compile(r"[\s,.!;:।॥\"'()\-]+")
+AFFIRM = (
+    "yes", "yeah", "yep", "yup", "ok", "okay", "confirm", "confirmed", "go ahead", "do it", "sure", "correct",
+    "haan", "haa", "haan ji", "ji haan", "theek hai", "thik hai", "kar do", "kardo",
+    "avunu", "sare", "cheyyi", "cheyi",
+    "हाँ", "हां", "हाँ जी", "हां जी", "जी हाँ", "जी हां", "ठीक है", "कर दो", "करो",
+    "అవును", "సరే", "చేయి", "చెయ్యి", "చేయండి",
+)  # fmt: skip
+DECLINE = (
+    "no", "nope", "cancel", "dont", "don't", "do not", "not", "stop", "wait", "never mind", "nevermind",
+    "nahi", "nahin", "mat", "mat karo", "rehne do", "ruko", "vaddu", "ledu", "kadu", "kaadu", "aagu",
+    "नहीं", "नही", "मत", "रुको", "रहने दो", "रद्द", "కాదు", "వద్దు", "లేదు", "ఆగు", "రద్దు",
+)  # fmt: skip
+
+
+def _phrase_text(text: str) -> str:
+    """NFC-normalised, casefolded words padded with spaces, for whole-word phrase matching in any script."""
+    words = [w for w in _PUNCT.split(normalise_text(text or "")) if w]
+    return f" {' '.join(words)} "
+
+
+def _has_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    padded = _phrase_text(text)
+    return any(_phrase_text(p) in padded for p in phrases)
+
+
+def affirmed(text: str) -> bool:
+    """An explicit yes in this utterance: not a question, no 'no / wait / don't' alongside it."""
+    if "?" in (text or "") or "？" in (text or ""):
+        return False
+    return _has_phrase(text, AFFIRM) and not _has_phrase(text, DECLINE)
+
+
+def declined(text: str) -> bool:
+    return _has_phrase(text, DECLINE)
 
 
 def decide_date(
@@ -506,24 +554,36 @@ def _outstanding_map(ctx: ToolContext) -> dict[uuid.UUID, Decimal]:
     return out
 
 
-def find_customer(ctx: ToolContext, args: dict[str, Any]) -> tuple[Customer | None, dict[str, Any] | None]:
-    """(customer, None) when resolved; (None, clarification) when missing, ambiguous or unknown."""
+def find_customer(
+    ctx: ToolContext, args: dict[str, Any], *, write: bool = False
+) -> tuple[Customer | None, dict[str, Any] | None]:
+    """(customer, None) when resolved; (None, clarification) when missing, ambiguous or unknown. For a write, a
+    customer_id must agree with the name the user said (see resolve_customer strict_name)."""
     cid = _uuid(args.get("customer_id"))
     name = (args.get("customer_name") or "").strip() or None
     if not cid and not name:
         return None, {"status": "needs_clarification", "missing": ["customer"], "message": "Which customer?"}
+    ev = _evidence(args) if write else {}
     r = resolve_customer(
         ctx.db,
         ctx.actor.business_id,
-        Operation(type="query_customer_balance", customer_id=cid, customer_name=name),
+        Operation(
+            type="query_customer_balance",
+            customer_id=cid,
+            customer_name=name,
+            evidence={k: v for k, v in ev.items() if k == "customer_name"},
+        ),
         _outstanding_map(ctx),
+        strict_name=write,
     )
     if r.status == "resolved" and r.id:
         return customer_service.get(ctx.db, ctx.actor.business_id, r.id), None
     if r.status == "ambiguous":
         return None, {
             "status": "needs_clarification",
-            "message": f"More than one customer matches '{name}'.",
+            "message": (f"{r.mismatch}. Which customer did you mean? Nothing was changed.")
+            if r.mismatch
+            else f"More than one customer matches '{name}'.",
             "candidates": [{"customer_id": str(c["id"]), "name": c["label"]} for c in r.candidates[:5]],
         }
     return None, {"status": "needs_clarification", "message": f"No customer named '{name or cid}' was found."}
@@ -1063,13 +1123,21 @@ def autonomy_decision(ctx: ToolContext, analysis: Analysis, needs_confirmation: 
 
 def _proposal_summary(action: ProposedAction) -> str:
     parts = []
-    for op in action.extracted_data.get("operations", []):
+    analysis = {x.get("index"): x for x in (action.extracted_data or {}).get("analysis", [])}
+    for i, op in enumerate(action.extracted_data.get("operations", [])):
         amt = (
             f" ₹{op['amount']}"
             if op.get("amount")
             else (" (remaining balance)" if op.get("amount_is_remaining") else "")
         )
-        who = op.get("customer_name") or op.get("vendor_name") or ""
+        # Read back the customer the operation will actually be recorded against, not the model's spelling.
+        resolved = (analysis.get(i) or {}).get("customer") or {}
+        who = (
+            (resolved.get("label") if resolved.get("status") == "resolved" else None)
+            or op.get("customer_name")
+            or op.get("vendor_name")
+            or ""
+        )
         when = ""
         if op["type"] == "create_payment_commitment" and op.get("expected_payment_date"):
             when = f" by {op['expected_payment_date']}"
@@ -1240,6 +1308,50 @@ def value_checks(ctx: ToolContext, ops: list[Operation]) -> list[str]:
     return reasons
 
 
+def _first_name_tokens(name: str) -> set[str]:
+    tokens = _clean_name(name).split()
+    return {tokens[0]} if tokens and len(tokens[0]) >= 3 else set()
+
+
+def other_customer_named(ctx: ToolContext, customer_id: uuid.UUID, label: str) -> str | None:
+    """When a write refers to a customer only by id (a pronoun: 'he paid'), the user's words of this turn must not
+    name a different customer while never naming this one ('Ramesh paid 5,000' after a result about Suresh)."""
+    said = _latest_utterance(ctx)
+    if not said:
+        return None
+    words = set(_clean_name(said).split())
+    own = set(_clean_name(label).split())
+    if words & own:
+        return None
+    rows = ctx.db.execute(
+        select(Customer.id, Customer.name).where(
+            Customer.business_id == ctx.actor.business_id, Customer.id != customer_id
+        )
+    ).all()
+    for _cid, n in rows:
+        hit = (_first_name_tokens(n) - own) & words
+        if hit:
+            return f"you said '{next(iter(hit))}' but the customer from earlier is {label}"
+    return None
+
+
+def binding_checks(ctx: ToolContext, analysis: Analysis) -> list[str]:
+    """Reasons to read back because the customer resolved from an id is not obviously the one the user named."""
+    reasons = []
+    for a in analysis.operations:
+        if (
+            a.op.customer_id
+            and a.customer.status == "resolved"
+            and a.customer.id
+            and not a.op.customer_name
+            and not a.op.evidence.get("customer_name")
+        ):
+            why = other_customer_named(ctx, a.customer.id, a.customer.label or "")
+            if why:
+                reasons.append(why)
+    return reasons
+
+
 def _payments_done_this_turn(ctx: ToolContext) -> dict[tuple[str, Decimal], dict[str, Any]]:
     """(invoice id, amount) of every payment an executed action of THIS turn recorded -> that execution's result."""
     rows = ctx.db.execute(
@@ -1328,6 +1440,7 @@ def run_operations(
         ops = kept
         analysis = analyse(ctx.db, business, ctx.today, ctx.transcript, ops, verify=True)
     reasons = value_checks(ctx, ops) if analysis.can_approve else []
+    reasons += binding_checks(ctx, analysis) if analysis.can_approve else []
     reasons += dup_reasons if analysis.can_approve else []
     reasons += [d.message or f"the {d.label} needs checking" for d in dates if d.action == "confirm"]
     decision = autonomy_decision(ctx, analysis, needs_confirmation or bool(reasons))
@@ -1716,6 +1829,16 @@ def confirm_pending_action(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
             "code": "CHANGED_SINCE_READ_BACK",
             "message": "That operation was changed after I read it back, so I did not run it. Please review it.",
         }
+    # The model deciding the user agreed is not enough: what the user said in THIS turn must be a clear yes.
+    if not affirmed(_latest_utterance(ctx)):
+        return {
+            "status": "needs_clarification",
+            "code": "NOT_AFFIRMED",
+            "action_id": str(action.id),
+            "summary": _proposal_summary(action),
+            "message": "The user did not clearly say yes, so nothing was recorded. Answer what they asked; the "
+            "read-back is still waiting for a yes or no.",
+        }
     return _execute_action(ctx, action)
 
 
@@ -1769,6 +1892,12 @@ def cancel_pending_action(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
             "status": "error",
             "code": "NOT_PENDING",
             "message": "That operation was already recorded, so it cannot be cancelled here. Nothing was changed.",
+        }
+    if not declined(_latest_utterance(ctx)):
+        return {
+            "status": "needs_clarification",
+            "code": "NOT_DECLINED",
+            "message": "The user did not say no or cancel, so the read-back is still pending. Nothing was changed.",
         }
     action, _ = action_service.reject(ctx.db, ctx.actor, aid, "Declined in conversation with KAIRA")
     return {
@@ -1857,7 +1986,7 @@ def correct_payment_amount(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
         ),
     )
     evidenced = amount_evidenced(correct, _evidence(a), ctx.transcript)
-    if not a.get("confirmed") or offered is None or not evidenced:
+    if not a.get("confirmed") or offered is None or not evidenced or not affirmed(_latest_utterance(ctx)):
         return {
             "status": "needs_confirmation",
             "recorded_amount": m(recorded_total),
@@ -1888,18 +2017,127 @@ def correct_payment_amount(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any
     }
 
 
+# --------------------------------------------------------------------------- non-financial edits
+EDIT_CONFIRMED = {
+    "type": "boolean",
+    "description": "true only when the user said yes to this exact change you read back in an earlier turn",
+}
+NOTE_KEYS = {"note": "notes", "notes": "note"}
+
+
+def _tokens(text: str) -> list[str]:
+    return [w for w in _PUNCT.split(normalise_text(text or "")) if w]
+
+
+def _text_said(value: str, said: str) -> bool:
+    """Free text (a note, an address) counts as said when its words are (nearly all) the user's words, and every
+    number in it was said."""
+    vt, st = _tokens(value), set(_tokens(said))
+    if not vt or any(any(ch.isdigit() for ch in t) and t not in st for t in vt):
+        return False
+    return sum(t in st for t in vt) / len(vt) >= 0.75
+
+
+def _value_said(field_name: str, value: str, said: str, fragment: str | None) -> bool:
+    if field_name == "phone":
+        digits = re.sub(r"\D", "", value)
+        return len(digits) >= 6 and digits in re.sub(r"\D", "", said)
+    if field_name == "email":
+        v = value.strip().casefold()
+        spoken = re.sub(r"\s+", "", normalise_text(said).replace(" at ", "@").replace(" dot ", "."))
+        return bool(v) and (v in normalise_text(said) or v in spoken)
+    if field_name == "invoice_number":
+        n = re.sub(r"\D", "", value)
+        return bool(n) and int(n) in {int(x) for x in re.findall(r"\d+", said)}
+    if _text_said(value, said):
+        return True
+    return bool(fragment) and normalise_text(fragment) in normalise_text(said) and _text_said(value, fragment)
+
+
+def _change_key(args: dict[str, Any]) -> str:
+    return json.dumps(
+        {k: v for k, v in sorted(args.items()) if k not in ("evidence", "confirmed")},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    ).casefold()
+
+
+def edit_gate(
+    ctx: ToolContext,
+    tool_name: str,
+    a: dict[str, Any],
+    values: dict[str, Any],
+    *,
+    customer: Customer | None = None,
+    summary: str,
+) -> dict[str, Any] | None:
+    """None when the edit may run now: every changed value is in the user's words of this turn (and an id-only
+    customer is not contradicted by a name they said), or the user said yes this turn to this exact change read
+    back to them in an earlier turn. Otherwise a needs_confirmation result; nothing is written."""
+    said = _latest_utterance(ctx)
+    ev = _evidence(a)
+    reasons = [
+        f"the {k.replace('_', ' ')} '{v}' is not in what the user just said"
+        for k, v in values.items()
+        if v not in (None, "") and not _value_said(k, str(v), said, ev.get(k) or ev.get(NOTE_KEYS.get(k, k)))
+    ]
+    id_only = _uuid(a.get("customer_id")) and not (a.get("customer_name") or ev.get("customer_name"))
+    if customer is not None and id_only:
+        why = other_customer_named(ctx, customer.id, customer.name)
+        if why:
+            reasons.append(why)
+    if not reasons:
+        return None
+    key = _change_key(a)
+    if (
+        a.get("confirmed")
+        and affirmed(said)
+        and _offered_for_confirmation(ctx, tool=tool_name, match=lambda args: _change_key(args) == key)
+    ):
+        return None
+    return {
+        "status": "needs_confirmation",
+        "customer": customer.name if customer is not None else None,
+        "summary": summary,
+        "confirmation_reasons": reasons,
+        "message": f"Nothing changed yet. Read the change back and ask the user to confirm; on yes call {tool_name} "
+        "again with exactly the same values and confirmed=true.",
+    }
+
+
 @tool(
     "update_customer",
     "Change a customer's phone, email, address or notes.",
-    {**CUSTOMER_REF, "phone": S, "email": S, "address": S, "notes": S},
+    {
+        **CUSTOMER_REF,
+        "phone": S,
+        "email": S,
+        "address": S,
+        "notes": S,
+        "evidence": EVIDENCE,
+        "confirmed": EDIT_CONFIRMED,
+    },
     kind="write",
     refresh=("customers",),
 )
 def update_customer(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    c, clar = find_customer(ctx, a)
+    c, clar = find_customer(ctx, a, write=True)
     if clar:
         return clar
     changes = {k: str(a[k]).strip() for k in ("phone", "email", "address") if a.get(k)}
+    said = {**changes, **({"notes": str(a["notes"]).strip()} if a.get("notes") else {})}
+    if said:
+        gate = edit_gate(
+            ctx,
+            "update_customer",
+            a,
+            said,
+            customer=c,
+            summary=f"Update {', '.join(f'{k} to {v}' for k, v in said.items())} for {c.name}",
+        )
+        if gate:
+            return gate
     if a.get("notes"):
         # Notes hold the dated collection history: a new note is appended, never written over it.
         line = f"[{ctx.today.isoformat()}] {str(a['notes']).strip()[:400]}"
@@ -1923,15 +2161,26 @@ def update_customer(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     "add_collection_note",
     "Add a dated collection note to a customer (e.g. 'said he will visit Friday'). Does not "
     "change any balance.",
-    {**CUSTOMER_REF, "note": S},
+    {**CUSTOMER_REF, "note": S, "evidence": EVIDENCE, "confirmed": EDIT_CONFIRMED},
     kind="write",
     required=("note",),
     refresh=("customers",),
 )
 def add_collection_note(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    c, clar = find_customer(ctx, a)
+    c, clar = find_customer(ctx, a, write=True)
     if clar:
         return clar
+    note = str(a.get("note") or "").strip()
+    gate = edit_gate(
+        ctx,
+        "add_collection_note",
+        a,
+        {"note": note},
+        customer=c,
+        summary=f"Add the note '{note[:120]}' for {c.name}",
+    )
+    if gate:
+        return gate
     line = f"[{ctx.today.isoformat()}] {a['note'].strip()[:400]}"
     c = customer_service.update(ctx.db, ctx.actor, c.id, {"notes": f"{c.notes}\n{line}" if c.notes else line})
     return {"status": "completed", "customer": c.name, "note": line}
@@ -1941,14 +2190,25 @@ def add_collection_note(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
     "record_missed_promise",
     "The customer did NOT pay as promised: marks their due pending promise as broken and "
     "adds a collection note. Never touches payments.",
-    {**CUSTOMER_REF, "note": S},
+    {**CUSTOMER_REF, "note": S, "evidence": EVIDENCE, "confirmed": EDIT_CONFIRMED},
     kind="write",
     refresh=("financial",),
 )
 def record_missed_promise(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
-    c, clar = find_customer(ctx, a)
+    c, clar = find_customer(ctx, a, write=True)
     if clar:
         return clar
+    note = str(a.get("note") or "").strip()
+    gate = edit_gate(
+        ctx,
+        "record_missed_promise",
+        a,
+        {"note": note},
+        customer=c,
+        summary=f"Mark {c.name}'s due promise as missed" + (f" with the note '{note[:120]}'" if note else ""),
+    )
+    if gate:
+        return gate
     rows, _ = commitment_service.list_commitments(
         ctx.db, ctx.actor.business_id, status="pending", customer_id=c.id
     )
@@ -1987,7 +2247,13 @@ def record_missed_promise(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]
 @tool(
     "update_invoice",
     "Change an invoice's due date or notes (amounts are changed only via items before any payment).",
-    {"invoice_number": S, "due_date": {**S, "description": "YYYY-MM-DD"}, "notes": S, "evidence": EVIDENCE},
+    {
+        "invoice_number": S,
+        "due_date": {**S, "description": "YYYY-MM-DD"},
+        "notes": S,
+        "evidence": EVIDENCE,
+        "confirmed": EDIT_CONFIRMED,
+    },
     kind="write",
     required=("invoice_number",),
     refresh=("financial",),
@@ -2022,6 +2288,19 @@ def update_invoice(ctx: ToolContext, a: dict[str, Any]) -> dict[str, Any]:
         changes["notes"] = a["notes"]
     if not changes:
         return {"status": "needs_clarification", "message": "What should change on the invoice?"}
+    gate = edit_gate(
+        ctx,
+        "update_invoice",
+        a,
+        {
+            "invoice_number": str(a["invoice_number"]),
+            **({"notes": str(a["notes"])} if a.get("notes") else {}),
+        },
+        summary=f"Update {' and '.join(sorted(changes))} of {inv.invoice_number}"
+        + (f" (due {changes['due_date'].isoformat()})" if "due_date" in changes else ""),
+    )
+    if gate:
+        return gate
     before = inv.due_date.isoformat() if inv.due_date else None
     invoice_service.update_invoice(ctx.db, ctx.actor, inv.id, changes)
     row = invoice_row(invoice_service.invoice_detail(ctx.db, ctx.actor.business, inv.id))
