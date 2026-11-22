@@ -38,12 +38,13 @@ export default function ActionsPage() {
   return (
     <>
       <PageHeader title="Approvals" subtitle="Everything KAIRA understood from your requests. Nothing is recorded until the owner approves it." />
-      <div role="tablist" aria-label="Proposal status" className="mb-6 inline-flex flex-wrap rounded-full bg-paper p-1 ring-1 ring-line">
+      {/* A filter, not a tab widget: toggle buttons in a labelled group (Tab moves between them, aria-pressed marks the current one). */}
+      <div role="group" aria-label="Proposal status" className="mb-6 inline-flex flex-wrap rounded-full bg-paper p-1 ring-1 ring-line">
         {TABS.map((t) => (
           <button
             key={t.value}
-            role="tab"
-            aria-selected={status === t.value}
+            type="button"
+            aria-pressed={status === t.value}
             onClick={() => { setStatus(t.value); setPage(1); }}
             className={cn("rounded-full px-4 py-1.5 text-sm font-semibold", status === t.value ? "bg-navy text-cream" : "text-muted hover:text-ink")}
           >

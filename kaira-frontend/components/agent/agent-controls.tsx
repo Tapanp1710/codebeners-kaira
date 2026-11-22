@@ -10,9 +10,11 @@
  *  - LiveToggle / MuteToggle / InterruptButton: the three voice controls. Mute and "Stop speaking" are disabled
  *    (not hidden) when they cannot apply, so the layout does not jump.
  *  - AgentTextForm: the typed path into the same conversation (sendText()).
+ * The buttons are memoised (their props are primitives and the engine's stable callbacks), so the frequent agent
+ * context updates while live (audio levels) do not re-render them.
  */
 import { Mic, MicOff, Power, Send, VolumeX } from "lucide-react";
-import { useCallback, useId, useState, type FormEvent } from "react";
+import { memo, useCallback, useId, useState, type FormEvent } from "react";
 
 import { useAgent } from "@/components/agent/agent-provider";
 import { Button, cn } from "@/components/ui/primitives";
@@ -72,20 +74,24 @@ export function useLiveSession() {
   };
 }
 
-export function LiveToggle({
+/** Start / end (or, after a reload, resume) the live session. `resume` comes from useAgent().resumeAvailable. */
+export const LiveToggle = memo(function LiveToggle({
   live,
   starting,
   onToggle,
   compact,
+  resume,
   testId = "agent-live-toggle",
 }: {
   live: boolean;
   starting: boolean;
   onToggle: () => void;
   compact?: boolean;
+  resume?: boolean;
   testId?: string;
 }) {
-  const label = live ? "End live session" : "Start live session";
+  const verb = live ? "End" : resume ? "Resume" : "Start";
+  const label = `${verb} live session`;
   return (
     <Button
       type="button"
@@ -99,12 +105,12 @@ export function LiveToggle({
       className={cn(compact && "px-2.5 sm:px-3")}
     >
       {live ? <Power className="size-4" aria-hidden="true" /> : <Mic className="size-4" aria-hidden="true" />}
-      <span className={cn(compact && "hidden sm:inline")}>{live ? (compact ? "End live" : "End live session") : compact ? "Start live" : "Start live session"}</span>
+      <span className={cn(compact && "hidden sm:inline")}>{compact ? `${verb} live` : label}</span>
     </Button>
   );
-}
+});
 
-export function MuteToggle({
+export const MuteToggle = memo(function MuteToggle({
   live,
   muted,
   onChange,
@@ -134,9 +140,19 @@ export function MuteToggle({
       {!compact && <span>{muted ? "Unmute" : "Mute"}</span>}
     </Button>
   );
-}
+});
 
-export function InterruptButton({ speaking, onInterrupt, compact, testId = "agent-interrupt" }: { speaking: boolean; onInterrupt: () => void; compact?: boolean; testId?: string }) {
+export const InterruptButton = memo(function InterruptButton({
+  speaking,
+  onInterrupt,
+  compact,
+  testId = "agent-interrupt",
+}: {
+  speaking: boolean;
+  onInterrupt: () => void;
+  compact?: boolean;
+  testId?: string;
+}) {
   return (
     <Button
       type="button"
@@ -153,7 +169,7 @@ export function InterruptButton({ speaking, onInterrupt, compact, testId = "agen
       {!compact && <span>Stop speaking</span>}
     </Button>
   );
-}
+});
 
 /**
  * Typed message into the same conversation. Keeps the text if sending fails so nothing is lost.

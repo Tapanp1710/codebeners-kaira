@@ -5,13 +5,16 @@
  * the same live session (useAgent()), so talking to KAIRA never requires leaving the page: mini orb (links to the
  * agent home), state text, live caption or last reply, live switch, mute, stop speaking and a compact text input.
  * On phones it collapses to orb + state + live switch; "More" expands the rest.
+ * Accessibility: the state line is a polite status region and KAIRA's last reply is announced once through a
+ * visually hidden polite live region (the visible caption also shows the word-by-word partial, which is not
+ * announced). The dock sits on navy, so its focus outline uses the light "dark surface" colour (globals.css).
  */
 import { ChevronDown, ChevronUp, Maximize2 } from "lucide-react";
 import Link from "next/link";
 import { useId, useState } from "react";
 
 import { AgentTextForm, InterruptButton, LiveToggle, MuteToggle, useLiveSession } from "@/components/agent/agent-controls";
-import { KairaOrb, ORB_STATUS } from "@/components/agent/kaira-orb";
+import { LiveKairaOrb, ORB_STATUS } from "@/components/agent/kaira-orb";
 import { cn } from "@/components/ui/primitives";
 
 export function AgentDock() {
@@ -27,16 +30,20 @@ export function AgentDock() {
         aria-label="KAIRA voice dock"
         data-testid="agent-dock"
         data-expanded={expanded}
+        data-surface="dark"
         className="pointer-events-auto mx-auto max-w-4xl rounded-3xl bg-navy/95 p-2.5 text-cream shadow-[0_18px_50px_-20px_rgb(13_27_42/0.8)] ring-1 ring-white/10 backdrop-blur sm:p-3"
       >
         <div className="flex items-center gap-2.5 sm:gap-3">
           <Link href="/agent" aria-label="Open KAIRA" className="shrink-0 rounded-full">
-            <KairaOrb state={orb} micLevel={agent.micLevel} outputLevel={agent.outputLevel} size="dock" />
+            <LiveKairaOrb state={orb} size="dock" />
           </Link>
           <div className="min-w-0 flex-1">
             <p role="status" aria-live="polite" className="truncate text-sm font-semibold" data-testid="dock-status">
               {status.label}
               {agent.live && !agent.muted && <span className="ml-2 text-xs font-normal text-sage">· mic on</span>}
+            </p>
+            <p className="sr-only" aria-live="polite" aria-atomic="true" data-testid="dock-reply-announcer">
+              {agent.lastReply ? `KAIRA: ${agent.lastReply}` : ""}
             </p>
             <p className={cn("truncate text-xs text-cream/70", !expanded && "hidden sm:block")} data-testid="dock-caption">
               {caption ? (
@@ -50,12 +57,12 @@ export function AgentDock() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <LiveToggle live={agent.live} starting={starting} onToggle={toggle} compact testId="dock-live-toggle" />
+            <LiveToggle live={agent.live} starting={starting} onToggle={toggle} resume={agent.resumeAvailable} compact testId="dock-live-toggle" />
             <span className={cn("items-center gap-1.5", expanded ? "flex" : "hidden sm:flex")}>
               <MuteToggle live={agent.live} muted={agent.muted} onChange={agent.setMuted} compact testId="dock-mute" />
               <InterruptButton speaking={orb === "speaking"} onInterrupt={agent.interrupt} compact testId="dock-interrupt" />
             </span>
-            <Link href="/agent" className="hidden rounded-full p-2 text-cream/70 hover:bg-white/10 hover:text-cream sm:inline-flex" aria-label="Open the full KAIRA view">
+            <Link href="/agent" className="hidden rounded-full p-2 text-cream/80 hover:bg-white/10 hover:text-cream sm:inline-flex" aria-label="Open the full KAIRA view">
               <Maximize2 className="size-4" aria-hidden="true" />
             </Link>
             <button
@@ -64,7 +71,7 @@ export function AgentDock() {
               aria-expanded={expanded}
               aria-controls={panelId}
               aria-label={expanded ? "Show less" : "Show more"}
-              className="rounded-full p-2 text-cream/70 hover:bg-white/10 hover:text-cream sm:hidden"
+              className="rounded-full p-2 text-cream/80 hover:bg-white/10 hover:text-cream sm:hidden"
             >
               {expanded ? <ChevronDown className="size-4" aria-hidden="true" /> : <ChevronUp className="size-4" aria-hidden="true" />}
             </button>

@@ -2,15 +2,18 @@
 
 /**
  * Recent conversation from useAgent().transcript (persisted on the server, oldest first). Shown newest at the
- * bottom like a chat, capped to the last `limit` entries.
+ * bottom like a chat, capped to the last `limit` entries. Memoised on the transcript array (the engine keeps it
+ * referentially stable between turns), so audio-level updates of the live session do not re-render it. It is not
+ * a live region: KAIRA's reply is announced once by the agent home / dock, and the user knows what they said.
  */
 import { Keyboard, Mic } from "lucide-react";
+import { memo } from "react";
 
 import { cn } from "@/components/ui/primitives";
 import type { TranscriptEntry } from "@/lib/agent/protocol";
 import { formatDateTime } from "@/lib/format/dates";
 
-export function Conversation({ transcript, limit = 30 }: { transcript: TranscriptEntry[]; limit?: number }) {
+export const Conversation = memo(function Conversation({ transcript, limit = 30 }: { transcript: TranscriptEntry[]; limit?: number }) {
   const entries = transcript.slice(-limit);
   if (entries.length === 0) {
     return (
@@ -20,7 +23,7 @@ export function Conversation({ transcript, limit = 30 }: { transcript: Transcrip
     );
   }
   return (
-    <ol className="space-y-3" data-testid="agent-transcript">
+    <ol className="space-y-3" data-testid="agent-transcript" aria-label="Conversation, oldest first">
       {entries.map((e) => {
         const user = e.role === "user";
         return (
@@ -48,4 +51,4 @@ export function Conversation({ transcript, limit = 30 }: { transcript: Transcrip
       })}
     </ol>
   );
-}
+});
