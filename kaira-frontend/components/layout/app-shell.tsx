@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { useSession } from "@/components/providers";
 import { Badge, cn } from "@/components/ui/primitives";
@@ -99,21 +99,59 @@ function NavLinks({ onNavigate, pendingCount }: { onNavigate?: () => void; pendi
 }
 
 /**
+ * Keyboard and pointer dismissal for the header popovers and the mobile drawer: while `open`, Escape closes and
+ * returns focus to `trigger`; a pointer press outside `container` (when given) closes without moving focus.
+ */
+function useDismiss(open: boolean, close: () => void, trigger: RefObject<HTMLElement | null>, container?: RefObject<HTMLElement | null>) {
+  const closeRef = useRef(close);
+  useEffect(() => {
+    closeRef.current = close;
+  });
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      closeRef.current();
+      trigger.current?.focus();
+    };
+    const onPointer = (e: PointerEvent) => {
+      if (container?.current && !container.current.contains(e.target as Node)) closeRef.current();
+    };
+    document.addEventListener("keydown", onKey);
+    if (container) document.addEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer);
+    };
+  }, [open, trigger, container]);
+}
+
+/** Header popover panel: full width under the header on phones (no horizontal overflow), anchored right above. */
+const POPOVER =
+  "fixed inset-x-4 top-16 z-30 rounded-2xl bg-paper shadow-xl ring-1 ring-line sm:absolute sm:inset-x-auto sm:top-auto sm:right-0 sm:mt-2";
+
+/**
  * Bell button with a dropdown of backend insights (GET /insights). The badge counts only
- * non-"info" insights, while the list shows all of them. The dropdown is a simple toggle: it does not
- * close on outside click or Esc, only on the bell or on following a link.
+ * non-"info" insights, while the list shows all of them. The dropdown closes on the bell, Escape (focus returns
+ * to the bell), a press outside it, or following a link.
  */
 function Notifications() {
   const insights = useInsights();
   const [open, setOpen] = useState(false);
+  const panelId = useId();
+  const button = useRef<HTMLButtonElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  useDismiss(open, () => setOpen(false), button, root);
   // Insights have no id in this payload, so list items are keyed by index below.
   const urgent = (insights.data ?? []).filter((i) => i.severity !== "info");
   return (
-    <div className="relative">
+    <div className="relative" ref={root}>
       <button
+        ref={button}
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         aria-label={`Alerts${urgent.length ? `, ${urgent.length} need attention` : ""}`}
         className="relative rounded-full p-2 text-ink hover:bg-navy/5"
       >
@@ -125,7 +163,7 @@ function Notifications() {
         )}
       </button>
       {open && (
-        <div className="absolute right-0 z-30 mt-2 w-80 rounded-2xl bg-paper p-3 shadow-xl ring-1 ring-line">
+        <div id={panelId} className={cn(POPOVER, "p-3 sm:w-80")}>
           <p className="px-2 pb-2 text-xs font-semibold uppercase tracking-wide text-muted">Alerts</p>
           {(insights.data ?? []).length === 0 && <p className="px-2 py-3 text-sm text-muted">No alerts.</p>}
           <ul className="max-h-80 space-y-1 overflow-y-auto">
@@ -172,6 +210,10 @@ function UserMenu() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const panelId = useId();
+  const button = useRef<HTMLButtonElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  useDismiss(open, () => setOpen(false), button, root);
   // Placed after all hooks so hook order stays stable when the session is cleared.
   if (!session) return null;
   /**
@@ -194,8 +236,16 @@ function UserMenu() {
     }
   }
   return (
-    <div className="relative">
-      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex items-center gap-2 rounded-full py-1 pr-3 pl-1 hover:bg-navy/5">
+    <div className="relative" ref={root}>
+      <button
+        ref={button}
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
+        aria-label={`${session.user.name}, account menu`}
+        className="flex items-center gap-2 rounded-full py-1 pr-1 pl-1 hover:bg-navy/5 sm:pr-3"
+      >
         <span className="grid size-8 place-items-center rounded-full bg-steel text-sm font-bold text-cream" aria-hidden="true">
           {session.user.name.slice(0, 1).toUpperCase()}
         </span>
@@ -205,7 +255,7 @@ function UserMenu() {
         </span>
       </button>
       {open && (
-        <div className="absolute right-0 z-30 mt-2 w-56 rounded-2xl bg-paper p-2 shadow-xl ring-1 ring-line">
+        <div id={panelId} className={cn(POPOVER, "p-2 sm:w-56")}>
           <p className="truncate px-3 py-2 text-xs text-muted">{session.user.email}</p>
           {isOwner && (
             <Link href="/settings" onClick={() => setOpen(false)} className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-cream">
@@ -230,23 +280,31 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { session } = useSession();
   const pathname = usePathname();
   const [mobileNav, setMobileNav] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const drawer = useRef<HTMLElement>(null);
+  useDismiss(mobileNav, () => setMobileNav(false), menuButton);
+  // Move focus into the drawer when it opens so keyboard and screen-reader users land on the navigation.
+  useEffect(() => {
+    if (mobileNav) drawer.current?.querySelector<HTMLElement>("a[href]")?.focus();
+  }, [mobileNav]);
   // Fetches a single row only to read `total`: the number of proposals awaiting approval.
   // Its key starts with "actions", so extract/approve/reject invalidations refresh this badge too.
   const pending = useActions({ status: "pending", page_size: 1 });
   const pendingCount = pending.data?.total ?? 0;
   const showDock = !(pathname === AGENT_HOME || pathname.startsWith(`${AGENT_HOME}/`));
 
-  // The mobile drawer is rendered only while open (role="dialog", aria-modal) and closes on backdrop
-  // click or navigation; it is not a native <dialog>, so it has no built-in focus trap or Esc handling.
+  // The mobile drawer is rendered only while open (role="dialog", aria-modal). Opening it focuses its first link;
+  // it closes on backdrop click, navigation or Escape (focus then returns to the menu button). It is not a native
+  // <dialog>, so it has no focus trap.
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[17rem_1fr]">
       <a href="#main" className="sr-only z-50 rounded bg-paper px-3 py-2 focus:not-sr-only focus:fixed focus:top-2 focus:left-2">
         Skip to content
       </a>
       {/* Sidebar (desktop) */}
-      <aside className="sticky top-0 hidden h-dvh flex-col overflow-y-auto bg-navy px-4 py-6 lg:flex">
+      <aside className="sticky top-0 hidden h-dvh flex-col overflow-y-auto bg-navy px-4 py-6 lg:flex" data-surface="dark">
         <Link href={AGENT_HOME} className="mb-8 flex items-center gap-3 px-2">
-          <span className="orb block size-8" data-state="idle" aria-hidden="true" />
+          <span className="orb block size-8" aria-hidden="true" />
           <span className="font-display text-xl font-semibold tracking-wide text-cream">KAIRA</span>
         </Link>
         <nav aria-label="Primary">
@@ -264,7 +322,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       {mobileNav && (
         <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
           <button type="button" className="absolute inset-0 bg-navy/50" aria-label="Close navigation" onClick={() => setMobileNav(false)} />
-          <nav aria-label="Primary" className="absolute inset-y-0 left-0 w-72 overflow-y-auto bg-navy px-4 py-6">
+          <nav ref={drawer} aria-label="Primary" data-surface="dark" className="absolute inset-y-0 left-0 w-72 max-w-[85vw] overflow-y-auto bg-navy px-4 py-6">
             <NavLinks pendingCount={pendingCount} onNavigate={() => setMobileNav(false)} />
           </nav>
         </div>
@@ -272,7 +330,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       <div className="min-w-0">
         <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line/70 bg-cream/90 px-4 py-3 backdrop-blur sm:px-8">
-          <button type="button" className="rounded-full p-2 lg:hidden" aria-label="Open navigation" onClick={() => setMobileNav(true)}>
+          <button
+            ref={menuButton}
+            type="button"
+            className="rounded-full p-2 lg:hidden"
+            aria-label="Open navigation"
+            aria-expanded={mobileNav}
+            onClick={() => setMobileNav(true)}
+          >
             <Menu className="size-5" aria-hidden="true" />
           </button>
           <p className="truncate font-display text-lg font-semibold lg:hidden">{session?.business.name}</p>

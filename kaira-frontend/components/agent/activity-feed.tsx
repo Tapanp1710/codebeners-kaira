@@ -4,10 +4,12 @@
  * What KAIRA is doing: one row per tool run from useAgent().activity (newest first), plus an "Understanding" row
  * while the orb is thinking. Each row shows the engine's own label, its state, the tool's summary and its result
  * fields exactly as the backend returned them; nothing here is invented or recomputed.
+ * Memoised on (activity, orb, limit), and each row on its item, so audio-level updates of the live session do not
+ * re-render the list. The polite live region is always mounted so new steps are announced as they appear.
  */
 import { AlertTriangle, CheckCircle2, CircleHelp, Loader2, Search, ShieldQuestion, Sparkles, Wrench, XCircle } from "lucide-react";
 import Link from "next/link";
-import type { ComponentType, SVGProps } from "react";
+import { memo, useMemo, type ComponentType, type SVGProps } from "react";
 
 import { Badge, cn, type Tone } from "@/components/ui/primitives";
 import type { ActivityItem, OrbState } from "@/lib/agent/protocol";
@@ -65,7 +67,7 @@ export function PhaseBadge({ phase }: { phase: ActivityPhase }) {
   );
 }
 
-function ActivityRow({ item }: { item: ActivityItem }) {
+const ActivityRow = memo(function ActivityRow({ item }: { item: ActivityItem }) {
   const phase = activityPhase(item);
   const fields = resultFields(item.result);
   const took = duration(item);
@@ -107,20 +109,20 @@ function ActivityRow({ item }: { item: ActivityItem }) {
       )}
     </li>
   );
-}
+});
 
 /** Tool runs, newest first. `limit` caps the rows (the dock shows fewer). */
-export function ActivityFeed({ activity, orb, limit = 20 }: { activity: ActivityItem[]; orb: OrbState; limit?: number }) {
-  const items = activity.slice(-limit).reverse();
+export const ActivityFeed = memo(function ActivityFeed({ activity, orb, limit = 20 }: { activity: ActivityItem[]; orb: OrbState; limit?: number }) {
+  const items = useMemo(() => activity.slice(-limit).reverse(), [activity, limit]);
   const understanding = orb === "thinking";
   return (
-    <div data-testid="agent-activity">
+    <div data-testid="agent-activity" aria-live="polite" aria-relevant="additions text">
       {items.length === 0 && !understanding ? (
         <p className="rounded-xl border border-dashed border-line px-4 py-6 text-center text-sm text-muted">
           Nothing yet. When KAIRA looks something up or records a change, each step appears here with its result.
         </p>
       ) : (
-        <ol className="space-y-2" aria-live="polite" aria-relevant="additions text">
+        <ol className="space-y-2" aria-label="KAIRA's steps, newest first">
           {understanding && (
             <li className="rounded-xl bg-white/60 p-3 ring-1 ring-line/80" data-testid="activity-item" data-phase="understanding">
               <div className="flex items-center gap-2">
@@ -136,4 +138,4 @@ export function ActivityFeed({ activity, orb, limit = 20 }: { activity: Activity
       )}
     </div>
   );
-}
+});

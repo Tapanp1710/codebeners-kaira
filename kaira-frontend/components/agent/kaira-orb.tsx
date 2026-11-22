@@ -11,13 +11,18 @@
  *      and KAIRA's voice while speaking;
  *   3. the core is scaled by the smoothed level (style.transform, written outside React so levels never re-render).
  * prefers-reduced-motion: the canvas is drawn once per state, levels are ignored and CSS animations are off.
+ * Pages render <LiveKairaOrb>, which reads the levels through useOrbLevels() (the single switchable levels source) so
+ * only the orb, not the page around it, needs to follow them. KairaOrb itself is memoised and the levels reach the
+ * animation loop through a ref.
  * Accessibility: role="img" with the state in its label. The visible status text is rendered by the parent from
  * ORB_STATUS (it sits in a role="status" region there), so the same words are seen and announced.
  */
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { memo, useEffect, useRef, useSyncExternalStore } from "react";
 
 import { cn } from "@/components/ui/primitives";
 import type { OrbState } from "@/lib/agent/protocol";
+
+import { useOrbLevels } from "./orb-levels";
 
 import styles from "./kaira-orb.module.css";
 
@@ -185,7 +190,7 @@ export type KairaOrbProps = {
   className?: string;
 };
 
-export function KairaOrb({ state, micLevel, outputLevel, size, className }: KairaOrbProps) {
+export const KairaOrb = memo(function KairaOrb({ state, micLevel, outputLevel, size, className }: KairaOrbProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const coreRef = useRef<HTMLSpanElement>(null);
@@ -269,4 +274,10 @@ export function KairaOrb({ state, micLevel, outputLevel, size, className }: Kair
       </span>
     </div>
   );
-}
+});
+
+/** The orb wired to the live session's audio levels (see orb-levels.ts). Use this on pages. */
+export const LiveKairaOrb = memo(function LiveKairaOrb(props: Omit<KairaOrbProps, "micLevel" | "outputLevel">) {
+  const { micLevel, outputLevel } = useOrbLevels();
+  return <KairaOrb {...props} micLevel={micLevel} outputLevel={outputLevel} />;
+});

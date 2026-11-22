@@ -44,15 +44,20 @@
     outline-offset: 2px;
     border-radius: 6px;
   }
+  /* Navy surfaces (agent stage, dock, sidebar, mobile drawer): steel is too dark there, use champagne. */
+  [data-surface="dark"] :focus-visible {
+    outline-color: var(--color-champagne);
+  }
   .num {
     font-variant-numeric: tabular-nums;
   }
 }
 
-/* ------------------------------------------------------------------ voice orb */
+/* ------------------------------------------------------------------ static brand orb
+ * The small decorative sphere beside the KAIRA wordmark (sidebar, login). The live voice orb with its per-state
+ * visuals is components/agent/kaira-orb.tsx + kaira-orb.module.css. */
 .orb {
   --orb-core: #415a77;
-  --orb-glow: #d4c4a8;
   --orb-edge: #778d7a;
   position: relative;
   border-radius: 9999px;
@@ -65,12 +70,8 @@
     inset 0 -6px 18px rgb(13 27 42 / 0.55),
     inset 0 4px 14px rgb(244 241 222 / 0.25),
     0 0 0 1px rgb(212 196 168 / 0.35);
-  transition:
-    transform 400ms ease,
-    box-shadow 400ms ease;
 }
-.orb::before,
-.orb::after {
+.orb::before {
   content: "";
   position: absolute;
   inset: -14%;
@@ -78,80 +79,6 @@
   z-index: -1;
   background: radial-gradient(circle, rgb(212 196 168 / 0.45), transparent 65%);
   opacity: 0.55;
-  transition: opacity 400ms ease;
-}
-.orb::after {
-  inset: -30%;
-  background: radial-gradient(circle, rgb(119 141 122 / 0.28), transparent 62%);
-  opacity: 0;
-}
-.orb[data-state="listening"] {
-  --orb-core: #4f6b8c;
-  --orb-edge: #8fa592;
-  animation: orb-breathe 1.6s ease-in-out infinite;
-}
-.orb[data-state="listening"]::after {
-  opacity: 1;
-  animation: orb-ripple 1.6s ease-out infinite;
-}
-.orb[data-state="processing"] {
-  --orb-edge: #d4c4a8;
-}
-.orb[data-state="processing"]::before {
-  opacity: 0.9;
-  background: conic-gradient(from 0deg, transparent, rgb(212 196 168 / 0.75), transparent 45%);
-  inset: -8%;
-  animation: orb-spin 1.4s linear infinite;
-}
-.orb[data-state="ready"] {
-  --orb-edge: #8fa592;
-  box-shadow:
-    inset 0 -6px 18px rgb(13 27 42 / 0.5),
-    0 0 0 2px rgb(119 141 122 / 0.75),
-    0 0 28px rgb(119 141 122 / 0.45);
-}
-.orb[data-state="speaking"] {
-  --orb-core: #5a7698;
-  animation: orb-speak 0.9s ease-in-out infinite;
-}
-.orb[data-state="speaking"]::after {
-  opacity: 0.8;
-}
-.orb[data-state="error"] {
-  --orb-core: #6b3a30;
-  --orb-edge: #9e3f2a;
-  box-shadow:
-    inset 0 -6px 18px rgb(13 27 42 / 0.55),
-    0 0 0 2px rgb(158 63 42 / 0.6);
-}
-
-@keyframes orb-breathe {
-  50% {
-    transform: scale(1.06);
-  }
-}
-@keyframes orb-ripple {
-  0% {
-    transform: scale(0.85);
-    opacity: 0.9;
-  }
-  100% {
-    transform: scale(1.25);
-    opacity: 0;
-  }
-}
-@keyframes orb-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@keyframes orb-speak {
-  25% {
-    transform: scale(1.04);
-  }
-  60% {
-    transform: scale(0.98);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
