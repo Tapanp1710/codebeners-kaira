@@ -1,0 +1,229 @@
+/*
+ * KAIRA orb (components/agent/kaira-orb.tsx). Colours come from the design palette (navy, abyss, steel, sage,
+ * champagne, cream). Each OrbState sets a few custom properties; only transform/opacity/filter are animated, so
+ * the browser can keep the layers on the GPU. The canvas layer (drawn in kaira-orb.tsx) adds the audio-reactive
+ * ring. prefers-reduced-motion stops every animation here (and the canvas loop in the component).
+ */
+.orb {
+  --core: #415a77;
+  --edge: #778d7a;
+  --glow: 212 196 168;
+  --halo-opacity: 0.55;
+  --sheen-speed: 14s;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  isolation: isolate;
+  border-radius: 9999px;
+}
+
+.hero {
+  width: min(72vw, 20rem);
+  aspect-ratio: 1;
+}
+
+.dock {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+
+.canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.halo {
+  position: absolute;
+  inset: 4%;
+  z-index: -1;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgb(var(--glow) / 0.42), transparent 68%);
+  opacity: var(--halo-opacity);
+  transition: opacity 500ms ease;
+  will-change: transform, opacity;
+}
+
+.core {
+  position: relative;
+  width: 60%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 9999px;
+  background:
+    radial-gradient(circle at 34% 28%, rgb(244 241 222 / 0.9), transparent 30%),
+    radial-gradient(circle at 66% 72%, var(--edge), transparent 58%),
+    radial-gradient(circle at 50% 50%, var(--core), #0d1b2a 80%);
+  box-shadow:
+    inset 0 -12px 32px rgb(13 27 42 / 0.6),
+    inset 0 6px 20px rgb(244 241 222 / 0.22),
+    0 0 0 1px rgb(212 196 168 / 0.35),
+    0 24px 70px -24px rgb(var(--glow) / 0.65);
+  transition:
+    filter 500ms ease,
+    box-shadow 500ms ease;
+  will-change: transform;
+}
+
+.dock .core {
+  width: 74%;
+  box-shadow:
+    inset 0 -4px 10px rgb(13 27 42 / 0.6),
+    inset 0 2px 6px rgb(244 241 222 / 0.22),
+    0 0 0 1px rgb(212 196 168 / 0.45);
+}
+
+.sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: conic-gradient(from 0deg, transparent, rgb(244 241 222 / 0.2), transparent 40%);
+  animation: orb-spin var(--sheen-speed) linear infinite;
+}
+
+/* ------------------------------------------------------------------ states */
+.orb[data-state="off"] {
+  --core: #2b3d52;
+  --edge: #55606f;
+  --halo-opacity: 0.2;
+  --sheen-speed: 24s;
+}
+.orb[data-state="off"] .core {
+  filter: saturate(0.6) brightness(0.85);
+}
+
+.orb[data-state="connecting"] {
+  --edge: #d4c4a8;
+  --halo-opacity: 0.45;
+  --sheen-speed: 3s;
+}
+.orb[data-state="connecting"] .halo {
+  animation: orb-pulse 1.6s ease-in-out infinite;
+}
+
+.orb[data-state="listening"] {
+  --edge: #8fa592;
+  --glow: 143 165 146;
+  --halo-opacity: 0.65;
+  --sheen-speed: 10s;
+}
+.orb[data-state="listening"] .halo {
+  animation: orb-breathe 3.2s ease-in-out infinite;
+}
+
+.orb[data-state="hearing"] {
+  --core: #4f6b8c;
+  --edge: #a9bfa9;
+  --glow: 168 190 160;
+  --halo-opacity: 0.9;
+  --sheen-speed: 6s;
+}
+
+.orb[data-state="thinking"] {
+  --edge: #d4c4a8;
+  --glow: 212 196 168;
+  --halo-opacity: 0.7;
+  --sheen-speed: 2.4s;
+}
+.orb[data-state="thinking"] .halo {
+  animation: orb-breathe 1.8s ease-in-out infinite;
+}
+
+.orb[data-state="retrieving"] {
+  --core: #4f6b8c;
+  --edge: #9db4cc;
+  --glow: 157 180 204;
+  --halo-opacity: 0.75;
+  --sheen-speed: 1.6s;
+}
+
+.orb[data-state="executing"] {
+  --core: #5d5a54;
+  --edge: #d4c4a8;
+  --glow: 212 196 168;
+  --halo-opacity: 0.85;
+  --sheen-speed: 2s;
+}
+.orb[data-state="executing"] .halo {
+  animation: orb-pulse 1.2s ease-in-out infinite;
+}
+
+.orb[data-state="speaking"] {
+  --core: #5a7698;
+  --edge: #f4f1de;
+  --glow: 244 241 222;
+  --halo-opacity: 0.8;
+  --sheen-speed: 5s;
+}
+
+.orb[data-state="muted"] {
+  --edge: #55606f;
+  --halo-opacity: 0.15;
+  --sheen-speed: 30s;
+}
+.orb[data-state="muted"] .core {
+  filter: grayscale(0.75) brightness(0.8);
+}
+
+.orb[data-state="reconnecting"] {
+  --edge: #c9a45c;
+  --glow: 201 164 92;
+  --halo-opacity: 0.5;
+  --sheen-speed: 4s;
+}
+.orb[data-state="reconnecting"] .halo {
+  animation: orb-flicker 2s steps(2, end) infinite;
+}
+
+.orb[data-state="error"] {
+  --core: #6b3a30;
+  --edge: #9e3f2a;
+  --glow: 158 63 42;
+  --halo-opacity: 0.5;
+  --sheen-speed: 40s;
+}
+.orb[data-state="error"] .core {
+  animation: orb-shake 420ms ease-in-out 1;
+}
+
+@keyframes orb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes orb-breathe {
+  50% {
+    transform: scale(1.08);
+  }
+}
+@keyframes orb-pulse {
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+}
+@keyframes orb-flicker {
+  50% {
+    opacity: 0.2;
+  }
+}
+@keyframes orb-shake {
+  25% {
+    transform: translateX(-3%);
+  }
+  75% {
+    transform: translateX(3%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .halo,
+  .sheen,
+  .orb[data-state] .halo,
+  .orb[data-state] .core {
+    animation: none;
+  }
+}

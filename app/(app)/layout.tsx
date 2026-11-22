@@ -1,7 +1,7 @@
 /**
  * Authenticated layout for the `(app)` route group. The parenthesised folder name is not part of the URL, so
- * /dashboard, /customers, /invoices, /receivables, /cashflow, /scenarios, /actions and /settings all render
- * inside this layout while /login does not.
+ * /agent (the KAIRA home), /dashboard, /customers, /invoices, /receivables, /cashflow, /scenarios, /actions and
+ * /settings all render inside this layout while /login does not.
  *
  * This Server Component is the authoritative auth gate. proxy.ts only checks that a `kaira_access` cookie exists;
  * here the backend itself is asked who the cookie belongs to before any protected page renders.
@@ -9,6 +9,7 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { AgentProvider } from "@/components/agent/agent-provider";
 import { AppShell } from "@/components/layout/app-shell";
 import { Providers } from "@/components/providers";
 import { getServerSession } from "@/lib/server/session";
@@ -27,7 +28,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     // proxy.ts copies the requested path + query into `x-kaira-path` so the user can be returned there after
     // signing in. `resume=1` makes the login page try a silent refresh first: an expired access cookie may still
     // have a valid refresh cookie. redirect() throws, so nothing below runs for this request.
-    const path = (await headers()).get("x-kaira-path") ?? "/dashboard";
+    const path = (await headers()).get("x-kaira-path") ?? "/agent";
     redirect(`/login?next=${encodeURIComponent(path)}&resume=1`);
   }
   // An unreachable backend is not an auth failure, so the user is not bounced to /login. A standalone page is
@@ -44,10 +45,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     );
   }
   // Authenticated: the session (user, role, csrf_token) is serialised into the client Providers, which keep the
-  // CSRF token in memory, expose isOwner to pages, and create the React Query client. AppShell adds navigation.
+  // CSRF token in memory, expose isOwner to pages, and create the React Query client. AgentProvider holds the one
+  // live KAIRA session (microphone, WebSocket, playback, conversation); because it sits in this layout, which is
+  // not re-mounted on navigation between (app) pages, the session survives moving around the app. AppShell adds
+  // navigation and the agent dock.
   return (
     <Providers session={result.session}>
-      <AppShell>{children}</AppShell>
+      <AgentProvider>
+        <AppShell>{children}</AppShell>
+      </AgentProvider>
     </Providers>
   );
 }

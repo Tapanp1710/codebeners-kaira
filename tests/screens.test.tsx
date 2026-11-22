@@ -1,5 +1,6 @@
 /**
- * Screen-level tests for navigation, payment recording, invoice creation and the assistant panel.
+ * Screen-level tests for navigation, payment recording and invoice creation (the agent UI is covered in
+ * tests/agent.test.tsx).
  * Everything is rendered with renderApp, so API calls go through the real client (CSRF, envelope
  * handling) to an in-test handler.
  */
@@ -10,7 +11,6 @@ import { describe, expect, it, vi } from "vitest";
 import { NAV } from "@/components/layout/app-shell";
 import { InvoiceForm } from "@/components/invoices/invoice-form";
 import { PaymentDialog } from "@/components/invoices/payment-form";
-import { AssistantPanel } from "@/components/voice/assistant-panel";
 import type { Invoice } from "@/lib/api/types";
 
 import { attemptServer } from "./attempt-server";
@@ -45,9 +45,19 @@ const invoice = {
 } as Invoice;
 
 describe("navigation", () => {
-  // The information architecture is fixed at five top-level destinations.
-  it("has exactly the five primary destinations", () => {
-    expect(NAV.map((n) => n.label)).toEqual(["Dashboard", "Customers & Invoices", "Receivables", "Cash-Flow Forecast", "What-If Analysis"]);
+  // Voice-first information architecture: the KAIRA agent home first, then the manual modules.
+  it("lists KAIRA first, then the manual modules, approvals and settings", () => {
+    expect(NAV.map((n) => n.label)).toEqual([
+      "KAIRA",
+      "Dashboard",
+      "Customers & Invoices",
+      "Receivables",
+      "Cash-Flow Forecast",
+      "What-If Analysis",
+      "Approvals",
+      "Settings",
+    ]);
+    expect(NAV.map((n) => n.href)).toEqual(["/agent", "/dashboard", "/customers", "/receivables", "/cashflow", "/scenarios", "/actions", "/settings"]);
   });
 });
 
@@ -176,65 +186,5 @@ describe("InvoiceForm", () => {
     expect(await screen.findByText("Choose a customer", { selector: "p" })).toBeInTheDocument();
     expect(screen.getByText("Describe the item")).toBeInTheDocument();
     expect(requests.some((r) => r.method === "POST")).toBe(false);
-  });
-});
-
-describe("AssistantPanel", () => {
-  // /ready reports voice_provider "not_configured"; the panel uses it to decide what to offer.
-  const readyHandler = (req: Request) =>
-    pathOf(req) === "GET /ready"
-      ? envelope({ status: "ready", checks: { voice_provider: "not_configured", extraction_provider: "rules" } })
-      : envelope({});
-
-  // Global fetch is stubbed as well as the client transport so /ready resolves whichever path reads it.
-  it("states honestly that voice needs the Sarvam key on the server", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => readyHandler(new Request(new URL(url, "http://localhost")))));
-    renderApp(<AssistantPanel />, { handler: readyHandler });
-    expect(await screen.findByText(/Voice is not available on this server yet/)).toBeInTheDocument();
-    vi.unstubAllGlobals();
-  });
-
-  // A getUserMedia rejection (NotAllowedError) must surface as an error state, not a fake "listening" UI.
-  it("reports a denied microphone instead of pretending to record", async () => {
-    // An empty class is enough: getUserMedia rejects first, so MediaRecorder is only feature-detected, never constructed.
-    Object.defineProperty(globalThis, "MediaRecorder", { value: class {}, configurable: true });
-    Object.defineProperty(navigator, "mediaDevices", {
-      value: { getUserMedia: vi.fn(async () => Promise.reject(new DOMException("denied", "NotAllowedError"))) },
-      configurable: true,
-    });
-    renderApp(<AssistantPanel />, { handler: readyHandler });
-    await userEvent.click(screen.getByTestId("voice-orb"));
-    expect(await screen.findByText(/Microphone access was blocked/)).toBeInTheDocument();
-    expect(screen.getByTestId("orb-state")).toHaveTextContent("error");
-  });
-
-  // No navigator.mediaDevices at all (old browser or insecure context) is reported to the user.
-  it("reports an unsupported browser", async () => {
-    Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
-    renderApp(<AssistantPanel />, { handler: readyHandler });
-    await userEvent.click(screen.getByTestId("voice-orb"));
-    expect(await screen.findByText(/cannot record audio/)).toBeInTheDocument();
-  });
-
-  // Typed fallback: posts the exact /assistant/extract body (input_mode "text") and shows the backend's answer.
-  it("sends a typed request to /assistant/extract and renders the answer", async () => {
-    const { requests } = renderApp(<AssistantPanel />, {
-      handler: (req) =>
-        pathOf(req) === "POST /assistant/extract"
-          ? envelope({
-              conversation_id: "c",
-              transcript: "How much do my customers owe me?",
-              language: null,
-              provider: "rules",
-              kind: "answer",
-              answer: { intent: "query_receivables", language: "en-IN", answer: "Customers owe you ₹2,29,500.00 across 4 invoice(s).", answer_language: "en-IN", data: {} },
-            })
-          : readyHandler(req),
-    });
-    await userEvent.type(screen.getByTestId("assistant-input"), "How much do my customers owe me?");
-    await userEvent.click(screen.getByTestId("assistant-submit"));
-    expect(await screen.findByTestId("assistant-answer")).toHaveTextContent("₹2,29,500.00");
-    const body = await requests.find((r) => pathOf(r) === "POST /assistant/extract")!.json();
-    expect(body).toEqual({ transcript: "How much do my customers owe me?", language: null, input_mode: "text" });
   });
 });

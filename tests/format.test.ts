@@ -63,11 +63,11 @@ describe("dates", () => {
 describe("navigation safety", () => {
   it("only allows same-origin relative redirects after login", () => {
     expect(safeNext("/customers/1")).toBe("/customers/1");
-    expect(safeNext("//evil.example")).toBe("/dashboard");
-    expect(safeNext("https://evil.example")).toBe("/dashboard");
-    expect(safeNext("/\\evil.example")).toBe("/dashboard");
-    expect(safeNext("/api/backend/api/v1/auth/logout")).toBe("/dashboard");
-    expect(safeNext(null)).toBe("/dashboard");
+    expect(safeNext("//evil.example")).toBe("/agent");
+    expect(safeNext("https://evil.example")).toBe("/agent");
+    expect(safeNext("/\\evil.example")).toBe("/agent");
+    expect(safeNext("/api/backend/api/v1/auth/logout")).toBe("/agent");
+    expect(safeNext(null)).toBe("/agent");
   });
   // Insight links are built from backend-provided types and ids only.
   it("routes insights to the related screen using backend ids only", () => {

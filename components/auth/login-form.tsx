@@ -23,9 +23,9 @@ import { describeError } from "@/lib/api/errors";
 /** Only same-origin relative paths are accepted as a post-login destination (no open redirects). */
 export function safeNext(next: string | null): string {
   // Rejects absolute URLs, protocol-relative "//host", the "/\host" form some browsers normalise to
-  // "//host", and /api/ paths (a JSON proxy route is never a page). Anything rejected falls back to /dashboard.
+  // "//host", and /api/ paths (a JSON proxy route is never a page). Anything rejected falls back to the agent home.
   if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\") || next.startsWith("/api/")) {
-    return "/dashboard";
+    return "/agent";
   }
   return next;
 }
