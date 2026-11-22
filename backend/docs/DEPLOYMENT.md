@@ -6,7 +6,7 @@
   graceful shutdown (20 s), HEALTHCHECK on `/health`.
 * `docker/entrypoint.sh`: runs `python -m app.cli check-config` (refuses insecure production settings), then, only
   when `RUN_MIGRATIONS_ON_START=true`, `wait-db --timeout 60` and `migrate`, then starts uvicorn on `PORT`
-  (default 8000) with `WEB_CONCURRENCY` workers (default 2) and `FORWARDED_ALLOW_IPS`.
+  (default 8000) with `WEB_CONCURRENCY` workers (default 1) and `FORWARDED_ALLOW_IPS`.
 * `docker-compose.prod.yml`: API only, with an external managed PostgreSQL from `.env.production`.
 * Repository root `.github/workflows/backend.yml`: quality gates (see README.md, "Tests").
 * Repository root `.github/workflows/backend-deploy.yml`: **manual** (`workflow_dispatch`, type `deploy`). It runs
@@ -49,7 +49,7 @@ Browser ──HTTPS──► Vercel (Next.js, kaira-frontend/) ──server-side
    * `AGENT_PUBLIC_WS_URL=wss://<your-render-service>.onrender.com/api/v1/agent/live`.
    * `SARVAM_API_KEY` for voice and the agent LLM (secret; server-side only).
    * `FORWARDED_ALLOW_IPS`: the addresses of Render's proxy, if client IPs from `X-Forwarded-For` are needed.
-   * `WEB_CONCURRENCY`: set explicitly. The WebSocket ticket's single-use check and the one-live-socket-per-user rule
+   * `WEB_CONCURRENCY`: keep 1 (the default). The WebSocket ticket's single-use check and the one-live-socket-per-user rule
      are kept in process memory, so they hold per worker process.
 5. The free plan sleeps when idle. The first request after a sleep waits for the container to start (and run
    migrations), and a sleeping service has no open live sessions.
