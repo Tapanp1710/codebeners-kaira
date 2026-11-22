@@ -26,7 +26,6 @@ from app.integrations.sarvam.realtime import (
     classify_stt_end,
 )
 
-
 pytestmark = pytest.mark.anyio
 
 
@@ -116,8 +115,15 @@ def test_stt_url_has_documented_parameters():
     stt = SttStream(settings(), SttConfig(), keyterms=["Ravi Kumar", "x" * 100])
     url = stt.url()
     assert url.startswith("wss://api.sarvam.ai/speech-to-text-realtime/ws?")
-    for part in ("language_code=auto", "model=saaras", "stream_type=fast", "encoding=linear16",
-                 "sample_rate=16000", "endpointing=vad", "keyterms="):
+    for part in (
+        "language_code=auto",
+        "model=saaras",
+        "stream_type=fast",
+        "encoding=linear16",
+        "sample_rate=16000",
+        "endpointing=vad",
+        "keyterms=",
+    ):
         assert part in url
     assert "x" * 65 not in url  # keyterms are capped at 64 characters
 
@@ -151,11 +157,23 @@ async def test_stt_non_fatal_error_keeps_stream_fatal_error_ends_it():
         ]
     )
     events = await collect(stt.events())
-    assert [e.get("code") or e.get("text") for e in events] == ["chunk_too_large", "after", "inactivity_timeout"]
+    assert [e.get("code") or e.get("text") for e in events] == [
+        "chunk_too_large",
+        "after",
+        "inactivity_timeout",
+    ]
 
 
-@pytest.mark.parametrize(("code", "expected"), [(1008, "closed_1008"), (1011, "closed_1011"),
-                                                (1003, "closed_1003"), (4000, "closed_4000"), (None, "closed_1006")])
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (1008, "closed_1008"),
+        (1011, "closed_1011"),
+        (1003, "closed_1003"),
+        (4000, "closed_4000"),
+        (None, "closed_1006"),
+    ],
+)
 async def test_stt_close_codes_become_fatal_errors(code, expected):
     stt = SttStream(settings(), SttConfig())
     stt.ws = FakeWs([{"event": "session.begin"}], close_code=code)
@@ -185,7 +203,9 @@ async def test_stt_send_pcm_rechunks_to_100ms_and_counts_seconds():
 
 async def test_stt_close_sends_end_and_reads_billed_audio():
     stt = SttStream(settings(), SttConfig())
-    ws = FakeWs([{"event": "transcript.final", "text": "x"}, {"event": "session.end", "audio_duration_s": 4.2}])
+    ws = FakeWs(
+        [{"event": "transcript.final", "text": "x"}, {"event": "session.end", "audio_duration_s": 4.2}]
+    )
     stt.ws = ws
     await stt.close()
     assert ws.sent[-1] == {"event": "end"}
@@ -282,8 +302,16 @@ def _audio(b: bytes) -> dict:
 
 async def test_tts_audio_until_final():
     tts = TtsStream(settings(), "en-IN", "aparna_en_companion")
-    tts.ws = FakeWs([_audio(b"ab"), "garbage", _audio(b""), _audio(b"cd"),
-                     {"type": "event", "data": {"event_type": "final"}}, _audio(b"zz")])
+    tts.ws = FakeWs(
+        [
+            _audio(b"ab"),
+            "garbage",
+            _audio(b""),
+            _audio(b"cd"),
+            {"type": "event", "data": {"event_type": "final"}},
+            _audio(b"zz"),
+        ]
+    )
     assert await collect(tts.audio()) == [b"ab", b"cd"]
 
 
