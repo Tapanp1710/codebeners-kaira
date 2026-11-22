@@ -41,7 +41,7 @@ const FORWARD_RESPONSE_HEADERS = ["content-type", "x-request-id", "retry-after",
 
 /**
  * origin     backend origin from BACKEND_ORIGIN (already validated, no path).
- * timeoutMs  default upstream timeout; audio endpoints are raised to at least 90 s below.
+ * timeoutMs  default upstream timeout; voice and agent-turn endpoints are raised to at least 90 s (upstreamTimeoutMs).
  * fetchImpl  injectable fetch for tests; defaults to the global fetch.
  * clientIp   browser address from a trusted proxy header (trustedClientIp), forwarded as x-forwarded-for.
  */
@@ -151,6 +151,20 @@ export function forwardedRequestHeaders(incoming: Headers, clientIp?: string | n
  * - Otherwise the backend's status and body are streamed through unchanged, with an allow-listed set
  *   of headers plus rewritten Set-Cookie headers.
  */
+/** Upstream budget for the slow endpoints (voice calls, typed agent turns). */
+export const LONG_UPSTREAM_TIMEOUT_MS = 90_000;
+
+/**
+ * Upstream timeout for a validated backend path. Voice endpoints call the external speech provider, and a typed
+ * agent turn (POST /agent/turn) may run up to the backend's AGENT_TURN_TIMEOUT_SECONDS (60 s) plus tool latency,
+ * so both get at least 90 s. The browser client (lib/api/client.ts) waits 95 s for them, so this proxy's 504
+ * normally arrives before the browser-side timeout fires.
+ */
+export function upstreamTimeoutMs(path: string, defaultMs: number): number {
+  const slow = path.endsWith("voice/transcribe") || path.endsWith("voice/speak") || /(^|\/)agent\/turn\/?$/.test(path);
+  return slow ? Math.max(defaultMs, LONG_UPSTREAM_TIMEOUT_MS) : defaultMs;
+}
+
 export async function proxyToBackend(request: Request, segments: string[], options: ProxyOptions): Promise<Response> {
   const path = upstreamPath(segments);
   if (!path) return envelopeError(404, "NOT_FOUND", "Unknown API path.");
@@ -166,11 +180,7 @@ export async function proxyToBackend(request: Request, segments: string[], optio
   // Raw bytes: preserves JSON exactly and multipart bodies (with their boundary) for audio uploads.
   const body = hasBody ? await request.arrayBuffer() : undefined;
 
-  // Voice endpoints call the external speech provider and can be slow, so they get at least 90 s.
-  // The browser client (lib/api/client.ts) waits 95 s for /voice/ calls, so this proxy's 504 normally
-  // arrives before the browser-side timeout fires.
-  const isAudio = path.endsWith("voice/transcribe") || path.endsWith("voice/speak");
-  const timeout = isAudio ? Math.max(options.timeoutMs, 90_000) : options.timeoutMs;
+  const timeout = upstreamTimeoutMs(path, options.timeoutMs);
   const doFetch = options.fetchImpl ?? fetch;
 
   let upstream: Response;

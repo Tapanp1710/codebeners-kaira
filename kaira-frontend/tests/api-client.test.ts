@@ -9,7 +9,19 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, kairaFetch, login, refreshSession, setSessionFromServer, setSessionLostHandler, setTransport, unwrap } from "@/lib/api/client";
+import {
+  api,
+  DEFAULT_TIMEOUT_MS,
+  kairaFetch,
+  login,
+  LONG_TIMEOUT_MS,
+  refreshSession,
+  requestTimeoutMs,
+  setSessionFromServer,
+  setSessionLostHandler,
+  setTransport,
+  unwrap,
+} from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
 
 // Builders for the backend's response envelope (success and error forms); errors carry an X-Request-ID.
@@ -187,5 +199,30 @@ describe("CSRF and sessions", () => {
       }),
     );
     expect(calls[0].headers.get("idempotency-key")).toBe("key-123");
+  });
+});
+
+// POST /agent/turn may legitimately take up to the backend's 60 s turn budget; it must not be cut at 30 s.
+describe("request timeouts", () => {
+  it("waits longer than the proxy's 90 s for voice calls and typed agent turns only", () => {
+    expect(DEFAULT_TIMEOUT_MS).toBe(30_000);
+    expect(LONG_TIMEOUT_MS).toBeGreaterThan(90_000);
+    expect(requestTimeoutMs("/api/backend/api/v1/agent/turn")).toBe(LONG_TIMEOUT_MS);
+    expect(requestTimeoutMs("/api/backend/api/v1/voice/transcribe")).toBe(LONG_TIMEOUT_MS);
+    expect(requestTimeoutMs("/api/backend/api/v1/agent/conversation")).toBe(DEFAULT_TIMEOUT_MS);
+    expect(requestTimeoutMs("/api/backend/api/v1/agent/session")).toBe(DEFAULT_TIMEOUT_MS);
+    expect(requestTimeoutMs("/api/backend/api/v1/insights")).toBe(DEFAULT_TIMEOUT_MS);
+  });
+
+  it("puts the long timeout on the outgoing agent turn request", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      route(() => ok({ reply: "hi", events: [] }));
+      await api.POST("/api/v1/agent/turn", { body: { text: "hello", turn_id: "t1", language: null } });
+      expect(spy).toHaveBeenCalledWith(LONG_TIMEOUT_MS);
+      expect(spy).not.toHaveBeenCalledWith(DEFAULT_TIMEOUT_MS);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

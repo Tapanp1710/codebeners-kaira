@@ -7,7 +7,15 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { forwardedRequestHeaders, proxyToBackend, rewriteSetCookie, trustedClientIp, upstreamPath } from "@/lib/server/proxy";
+import {
+  forwardedRequestHeaders,
+  LONG_UPSTREAM_TIMEOUT_MS,
+  proxyToBackend,
+  rewriteSetCookie,
+  trustedClientIp,
+  upstreamPath,
+  upstreamTimeoutMs,
+} from "@/lib/server/proxy";
 
 // Internal-looking host on purpose: the outage test asserts this name never appears in a response body.
 const ORIGIN = "http://backend.internal:8000";
@@ -240,5 +248,32 @@ describe("root proxy (middleware) for /api/backend", () => {
     const ok = proxy(new NextRequest("http://app.local/api/backend/api/v1/auth/me"));
     expect(ok.status).toBe(200);
     expect(ok.headers.get("location")).toBeNull();
+  });
+});
+
+// The backend allows a typed agent turn up to AGENT_TURN_TIMEOUT_SECONDS = 60 s; a 30 s proxy cut-off would turn a
+// slow but successful turn into a 504 that the user then retries.
+describe("upstream timeouts", () => {
+  it("gives voice calls and POST /agent/turn at least 90 s, everything else the default", () => {
+    expect(LONG_UPSTREAM_TIMEOUT_MS).toBe(90_000);
+    expect(upstreamTimeoutMs("api/v1/agent/turn", 30_000)).toBe(90_000);
+    expect(upstreamTimeoutMs("api/v1/voice/transcribe", 30_000)).toBe(90_000);
+    expect(upstreamTimeoutMs("api/v1/voice/speak", 30_000)).toBe(90_000);
+    expect(upstreamTimeoutMs("api/v1/agent/turn", 120_000)).toBe(120_000); // a larger configured default wins
+    expect(upstreamTimeoutMs("api/v1/agent/conversation", 30_000)).toBe(30_000);
+    expect(upstreamTimeoutMs("api/v1/agent/session", 30_000)).toBe(30_000);
+    expect(upstreamTimeoutMs("api/v1/dashboard", 30_000)).toBe(30_000);
+  });
+
+  it("applies the long budget to the upstream fetch of an agent turn", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const fetchImpl = vi.fn(async () => upstream(JSON.stringify({ success: true, data: {}, error: null }), { headers: { "content-type": "application/json" } }));
+      const req = new Request("http://app.local/api/backend/api/v1/agent/turn", { method: "POST", body: "{}" });
+      await proxyToBackend(req, ["api", "v1", "agent", "turn"], { origin: ORIGIN, timeoutMs: 30_000, fetchImpl });
+      expect(spy).toHaveBeenCalledWith(90_000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
