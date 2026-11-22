@@ -1,4 +1,4 @@
-# KAIRA API Contract (v1.1.0)
+# KAIRA API Contract (v1.2.0)
 
 The backend owns this contract. The machine-readable source of truth is
 [`docs/openapi.json`](openapi.json) (regenerate with `python -m app.cli export-openapi`;
@@ -7,8 +7,12 @@ file cannot express. The frontend must not invent endpoints or fields.
 
 ## Base URL
 
-`{NEXT_PUBLIC_API_BASE_URL}` = `http(s)://<host>:<port>/api/v1` (e.g. `http://localhost:8000/api/v1`).
-Operational endpoints `/health` and `/ready` also exist without the prefix.
+Backend: `http(s)://<host>:<port>/api/v1` (e.g. `http://127.0.0.1:8000/api/v1`). Operational endpoints `/health`
+and `/ready` also exist without the prefix.
+
+The KAIRA web app never calls the backend from the browser for HTTP: it calls its own same-origin proxy
+`/api/backend/api/v1/...`, and the Next.js server forwards to `BACKEND_ORIGIN`. The live voice WebSocket is the one
+exception: the browser connects to `ws_url` from `POST /agent/session` directly (see "Live voice agent").
 
 ## Envelope
 
@@ -54,6 +58,7 @@ per endpoint in OpenAPI (`status`, `customer_id`, `search`, date ranges, `sort` 
 * `POST /auth/logout` revokes the refresh token and clears cookies.
 * Non-browser clients may use `Authorization: Bearer <access token>`; CSRF does not apply.
 * Roles: `owner` (everything) and `staff` (cannot approve/reject actions or change business settings → `403 FORBIDDEN`).
+  A staff user's agent writes are stored as proposals that wait for the owner (`needs_owner_approval`).
 
 ## Idempotency
 
@@ -104,7 +109,9 @@ See PAYMENT_ATTEMPTS.md for the full state machine. Client flow:
    - **409 `PAYMENT_ALREADY_RECORDED`**: a payment exists under the key, so the attempt becomes `succeeded`.
 
 The idempotency key is never returned. Clients act on the attempt `id`. Writes need the `X-CSRF-Token` header and
-are rate limited per user (`RATE_LIMIT_PAYMENT_PER_MINUTE`).
+are rate limited per user (`RATE_LIMIT_PAYMENT_PER_MINUTE`). Pending attempts never expire on their own; an operator
+resolves stale ones with `python -m app.cli reconcile-payment-attempts`, which acts only on proof found under row
+locks.
 
 ## Endpoints
 
@@ -135,9 +142,28 @@ are rate limited per user (`RATE_LIMIT_PAYMENT_PER_MINUTE`).
 | `POST /actions/{id}/reject` | Owner only. `{reason?}`; no financial change |
 | `GET /insights` | Data-driven alerts (`severity`: critical/warning/info) |
 | `GET /audit-logs` | Filter by `entity_type`, `entity_id`, `source_action_id` |
+| `POST /agent/session` | `{resume_session_id?}` → `{session_id, ticket, ws_url, expires_in, voice_configured, stt_model, tts_model}`: a single-use WebSocket ticket |
+| `WS /agent/live?ticket=…` | Live voice: PCM audio in, transcripts, agent events and PCM speech out. Ticket auth, `Origin` checked against `CORS_ORIGINS`. Not in OpenAPI |
+| `POST /agent/turn` | `{text, turn_id?, language?}` → `{turn_id, reply, language, ignored, replayed, duration_ms, events[]}`: one typed turn through the agent |
+| `GET /agent/conversation` | This user's conversation history (oldest first, ≤ 50, last 30 days) |
+| `GET /agent/sessions/{id}` | Usage of one live session (billed STT seconds, sent seconds, TTS characters, LLM calls, provider errors) |
 | `GET /health`, `GET /ready` | Liveness; readiness (database, migrations, provider configuration) |
 
-## Voice → proposal → approval flow (frontend)
+## Live voice agent
+
+The primary interface. Full protocol, event list and autonomy policy: `VOICE_AGENT.md`.
+
+1. `POST /agent/session` (cookie session + CSRF) → ticket and `ws_url`.
+2. Open `{ws_url}?ticket=<ticket>` from the browser; ask for a new ticket for every reconnect.
+3. Stream 16 kHz Int16 PCM; the server sends transcripts, `tool.*` events (with `refresh` hints), `reply` and PCM
+   speech.
+4. Write tools return `completed`, `needs_confirmation` (read back; runs only after a "yes" in a later turn),
+   `needs_clarification` or `needs_owner_approval` (listed under `GET /actions`, decided with
+   `POST /actions/{id}/approve|reject`). The server decides which, not the model.
+5. Without a socket, `POST /agent/turn` runs the same agent for typed input. Resending the same `turn_id` replays
+   the stored reply.
+
+## Extract → proposal → approval flow (REST)
 
 1. Record with explicit mic interaction → `POST /voice/transcribe` (or let the user type).
 2. Show the transcript, allow editing.
