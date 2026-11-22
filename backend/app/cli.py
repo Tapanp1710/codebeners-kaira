@@ -10,6 +10,10 @@ python -m app.cli create-owner --business "Name" --email you@x.com --name "You" 
 python -m app.cli create-user --owner-email owner@x.com --email staff@x.com --name "Staff" [--role staff]
                                     add a user to that owner's business (password from KAIRA_USER_PASSWORD
                                     or prompted)
+python -m app.cli reconcile-payment-attempts [--dry-run] [--older-than-minutes 30] [--limit 500]
+                                    [--business-id UUID] [--json]
+                                    resolve stale pending payment attempts from proof under row locks
+                                    (safe to run from several workers at once, and again after a crash)
 python -m app.cli export-openapi [path]
 """
 
@@ -234,6 +238,81 @@ def cmd_create_user(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reconcile_payment_attempts(args: argparse.Namespace) -> int:
+    """Links pending attempts whose payment was recorded (response lost), cancels the ones proven never
+    executed, and leaves the rest pending. Prints ids and outcomes only: never keys or request bodies.
+    Exit code 0 when the run finished (even if some attempts stay pending), 2 on bad arguments."""
+    import uuid
+    from datetime import timedelta
+
+    from app.db.session import build_engine, build_session_factory
+    from app.services import payment_attempt_service as pas
+
+    if args.older_than_minutes < 1:
+        print("--older-than-minutes must be at least 1.", file=sys.stderr)
+        return 2
+    if args.limit < 1:
+        print("--limit must be at least 1.", file=sys.stderr)
+        return 2
+    try:
+        business_id = uuid.UUID(args.business_id) if args.business_id else None
+    except ValueError:
+        print("--business-id must be a UUID.", file=sys.stderr)
+        return 2
+    engine = build_engine(_settings())
+    try:
+        factory = build_session_factory(engine)
+        report = pas.reconcile_pending(
+            factory,
+            older_than=timedelta(minutes=args.older_than_minutes),
+            dry_run=args.dry_run,
+            limit=args.limit,
+            business_id=business_id,
+        )
+    finally:
+        engine.dispose()
+    counts = {
+        o: report.count(o)
+        for o in (
+            pas.RECONCILE_SUCCEEDED,
+            pas.RECONCILE_CANCELLED,
+            pas.RECONCILE_PENDING,
+            pas.RECONCILE_SKIPPED,
+        )
+    }
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "dry_run": report.dry_run,
+                    "counts": counts,
+                    "items": [
+                        {
+                            "attempt_id": str(i.attempt_id),
+                            "business_id": str(i.business_id),
+                            "resource_type": i.resource_type,
+                            "resource_id": str(i.resource_id),
+                            "outcome": i.outcome,
+                            "reason": i.reason,
+                            "payment_id": str(i.payment_id) if i.payment_id else None,
+                        }
+                        for i in report.items
+                    ],
+                }
+            )
+        )
+        return 0
+    prefix = "[dry run] would be " if report.dry_run else ""
+    for i in report.items:
+        linked = f" payment={i.payment_id}" if i.payment_id else ""
+        print(
+            f"{prefix}{i.outcome}: attempt={i.attempt_id} {i.resource_type}={i.resource_id} ({i.reason}){linked}"
+        )
+    summary = ", ".join(f"{k}={v}" for k, v in counts.items())
+    print(f"{'Dry run, nothing changed' if report.dry_run else 'Reconciled'}: {summary}")
+    return 0
+
+
 def cmd_export_openapi(args: argparse.Namespace) -> int:
     from app.main import create_app
 
@@ -278,6 +357,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--name", required=True)
     p.add_argument("--role", choices=("staff", "owner"), default="staff")
     p.set_defaults(func=cmd_create_user)
+    p = sub.add_parser(
+        "reconcile-payment-attempts",
+        help="resolve stale pending payment attempts (link recorded payments, cancel proven-unexecuted ones)",
+    )
+    p.add_argument("--dry-run", action="store_true", help="decide under the same locks, change nothing")
+    p.add_argument(
+        "--older-than-minutes",
+        type=int,
+        default=30,
+        help="only attempts registered at least this long ago (default 30, minimum 1)",
+    )
+    p.add_argument(
+        "--limit", type=int, default=500, help="maximum attempts handled in this run (default 500)"
+    )
+    p.add_argument("--business-id", default=None, help="only this business")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_reconcile_payment_attempts)
     p = sub.add_parser("export-openapi")
     p.add_argument("path", nargs="?", default="docs/openapi.json")
     p.set_defaults(func=cmd_export_openapi)
