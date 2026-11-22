@@ -746,6 +746,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/agent/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start or resume a live voice session */
+        post: operations["start_session_api_v1_agent_session_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agent/turn": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** One typed conversational turn */
+        post: operations["turn_api_v1_agent_turn_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agent/conversation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Conversation history */
+        get: operations["get_conversation_api_v1_agent_conversation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/agent/sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Usage of one live session */
+        get: operations["session_usage_api_v1_agent_sessions__session_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1598,16 +1666,6 @@ export interface components {
             data?: components["schemas"]["ReminderOut"] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
-        /** Envelope[SessionOut] */
-        Envelope_SessionOut_: {
-            /**
-             * Success
-             * @default true
-             */
-            success: boolean;
-            data?: components["schemas"]["SessionOut"] | null;
-            error?: components["schemas"]["ErrorDetail"] | null;
-        };
         /** Envelope[SimulationOut] */
         Envelope_SimulationOut_: {
             /**
@@ -1638,8 +1696,31 @@ export interface components {
             data?: components["schemas"]["TranscriptionOut"] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
+        /** Envelope[TurnOut] */
+        Envelope_TurnOut_: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["TurnOut"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
         /** Envelope[dict] */
         Envelope_dict_: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            /** Data */
+            data?: {
+                [key: string]: unknown;
+            } | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
+        /** Envelope[dict[str, Any]] */
+        Envelope_dict_str__Any__: {
             /**
              * Success
              * @default true
@@ -1660,6 +1741,19 @@ export interface components {
             success: boolean;
             /** Data */
             data?: components["schemas"]["InsightOut"][] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
+        /** Envelope[list[dict[str, Any]]] */
+        Envelope_list_dict_str__Any___: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            /** Data */
+            data?: {
+                [key: string]: unknown;
+            }[] | null;
             error?: components["schemas"]["ErrorDetail"] | null;
         };
         /** ErrorDetail */
@@ -2751,20 +2845,10 @@ export interface components {
              */
             candidates: components["schemas"]["Candidate"][];
         };
-        /** SessionOut */
-        SessionOut: {
-            user: components["schemas"]["UserOut"];
-            business: components["schemas"]["BusinessOut"];
-            /**
-             * Csrf Token
-             * @description Send as X-CSRF-Token on POST/PATCH/PUT/DELETE.
-             */
-            csrf_token: string;
-            /**
-             * Access Token Expires At
-             * Format: date-time
-             */
-            access_token_expires_at: string;
+        /** SessionStart */
+        SessionStart: {
+            /** Resume Session Id */
+            resume_session_id?: string | null;
         };
         /** ShortfallOut */
         ShortfallOut: {
@@ -2982,6 +3066,34 @@ export interface components {
             /** Request Id */
             request_id: string | null;
         };
+        /** TurnIn */
+        TurnIn: {
+            /** Text */
+            text: string;
+            /** Turn Id */
+            turn_id?: string | null;
+            /** Language */
+            language?: string | null;
+        };
+        /** TurnOut */
+        TurnOut: {
+            /** Turn Id */
+            turn_id: string;
+            /** Reply */
+            reply: string;
+            /** Language */
+            language: string;
+            /** Ignored */
+            ignored: boolean;
+            /** Replayed */
+            replayed: boolean;
+            /** Duration Ms */
+            duration_ms: number;
+            /** Events */
+            events: {
+                [key: string]: unknown;
+            }[];
+        };
         /** UpcomingBillOut */
         UpcomingBillOut: {
             /**
@@ -3054,6 +3166,61 @@ export interface components {
              * @default false
              */
             blocking: boolean;
+        };
+        /** SessionOut */
+        app__api__v1__endpoints__agent__SessionOut: {
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+            /** Ticket */
+            ticket: string;
+            /** Ws Url */
+            ws_url: string;
+            /** Expires In */
+            expires_in: number;
+            /** Voice Configured */
+            voice_configured: boolean;
+            /** Stt Model */
+            stt_model: string;
+            /** Tts Model */
+            tts_model: string;
+        };
+        /** Envelope[SessionOut] */
+        app__schemas__common__Envelope_SessionOut___1: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["app__schemas__core__SessionOut"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
+        /** Envelope[SessionOut] */
+        app__schemas__common__Envelope_SessionOut___2: {
+            /**
+             * Success
+             * @default true
+             */
+            success: boolean;
+            data?: components["schemas"]["app__api__v1__endpoints__agent__SessionOut"] | null;
+            error?: components["schemas"]["ErrorDetail"] | null;
+        };
+        /** SessionOut */
+        app__schemas__core__SessionOut: {
+            user: components["schemas"]["UserOut"];
+            business: components["schemas"]["BusinessOut"];
+            /**
+             * Csrf Token
+             * @description Send as X-CSRF-Token on POST/PATCH/PUT/DELETE.
+             */
+            csrf_token: string;
+            /**
+             * Access Token Expires At
+             * Format: date-time
+             */
+            access_token_expires_at: string;
         };
     };
     responses: never;
@@ -3163,7 +3330,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Envelope_SessionOut_"];
+                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___1"];
                 };
             };
             /** @description Validation Error */
@@ -3192,7 +3359,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Envelope_SessionOut_"];
+                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___1"];
                 };
             };
         };
@@ -3232,7 +3399,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Envelope_SessionOut_"];
+                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___1"];
                 };
             };
         };
@@ -4713,6 +4880,123 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Envelope_ApprovalOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_session_api_v1_agent_session_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionStart"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["app__schemas__common__Envelope_SessionOut___2"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    turn_api_v1_agent_turn_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TurnIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_TurnOut_"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_conversation_api_v1_agent_conversation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_list_dict_str__Any___"];
+                };
+            };
+        };
+    };
+    session_usage_api_v1_agent_sessions__session_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_dict_str__Any__"];
                 };
             };
             /** @description Validation Error */

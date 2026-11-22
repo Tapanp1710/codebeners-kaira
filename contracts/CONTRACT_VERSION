@@ -1,8 +1,8 @@
-api_version=1.1.0
+api_version=1.2.0
 backend_branch=feat/payment-integrity
-backend_commit=578cedeefe23c7ba27df8b9d618a9bca27cf64ee
-openapi_sha256=6a83d72da544886c663ed817ab60bc7e7e3f6ababdba4a26b9086ffd712e67fc
-paths=43
-schemas=117
+backend_commit=e16a578b8001cef1ed52be5a4d5e3c4fb8ce3eaf
+openapi_sha256=a18a04c9c0dfc2d73c5aa75135e38bcae1da767a018c7fdcb0d7f86d59eaf621
+paths=47
+schemas=125
 imported_on=2026-11-22
 types_generator=openapi-typescript@7.13.0
