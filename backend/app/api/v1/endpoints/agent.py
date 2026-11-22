@@ -9,6 +9,8 @@ GET  /agent/sessions/{id}  usage of one session (billed STT seconds, TTS charact
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import secrets
 import time
 import uuid
@@ -27,6 +29,7 @@ from app.schemas.common import Envelope, ok
 from app.services.agent import orchestrator
 from app.services.agent.live import LiveSession
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["agent"])
 TICKET_TYPE = "agent_ws"
 TICKET_AUDIENCE = "kaira-agent-ws"
@@ -167,7 +170,14 @@ async def live(ws: WebSocket):
         )
         await ws.close(code=1000)
         return
-    await LiveSession(ws, ws.app.state, user_id=user_id, business_id=business_id, session_id=session_id).run()
+    try:
+        await LiveSession(
+            ws, ws.app.state, user_id=user_id, business_id=business_id, session_id=session_id
+        ).run()
+    except Exception:  # noqa: BLE001 - an unexpected failure ends this socket, never the process
+        logger.exception("live session %s failed", session_id)
+        with contextlib.suppress(Exception):
+            await ws.close(code=1011, reason="internal error")
 
 
 @router.post("/turn", response_model=Envelope[AgentTurnOut], summary="One typed conversational turn")
