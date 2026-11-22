@@ -12,7 +12,7 @@ Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · TanStack 
 Vitest · Playwright.
 
 Screens: **Dashboard · Customers & Invoices · Receivables · Cash-Flow Forecast · What-If Analysis**, plus Approvals,
-Settings (owner only) and the KAIRA assistant (the orb, bottom right).
+Settings (owner only). The KAIRA agent home (/agent, the landing screen) and a persistent agent dock on every page are the primary interface.
 
 ## Quick start
 

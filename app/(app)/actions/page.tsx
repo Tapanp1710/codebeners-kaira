@@ -55,7 +55,7 @@ export default function ActionsPage() {
       {actions.isPending && <LoadingBlock rows={3} />}
       {actions.data && actions.data.items.length === 0 && (
         <EmptyState title={status === "pending" ? "Nothing waiting for approval" : "No proposals here"}>
-          Use the KAIRA orb (bottom right) to speak or type a request.
+          Talk to KAIRA (the orb on the KAIRA screen or the dock at the bottom of every page).
         </EmptyState>
       )}
       <div className="space-y-5">

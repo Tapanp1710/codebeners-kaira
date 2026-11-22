@@ -11,7 +11,7 @@
  *
  * Layers, bottom to top: `transport` (plain fetch, swappable in tests) -> `kairaFetch` (CSRF header,
  * timeouts, refresh/CSRF retry) -> `api` (typed openapi-fetch client over lib/api/types `paths`) ->
- * `unwrap()` (envelope -> payload or ApiError). Consumers: lib/api/hooks.ts, lib/api/voice.ts,
+ * `unwrap()` (envelope -> payload or ApiError). Consumers: lib/api/hooks.ts, lib/agent/api.ts,
  * components/providers.tsx (session seeding/listening) and components/auth/login-form.tsx.
  * Module-level state below is per browser tab and is reset by any full page load.
  */

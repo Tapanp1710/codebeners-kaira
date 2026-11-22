@@ -1,7 +1,7 @@
 /**
  * Catch-all Route Handler for /api/backend/* - the HTTP entry point of the same-origin backend proxy.
  *
- * Browser code (lib/api/client.ts, lib/api/voice.ts, useReadiness in lib/api/hooks.ts) calls
+ * Browser code (lib/api/client.ts, lib/agent/api.ts, useReadiness in lib/api/hooks.ts) calls
  * /api/backend/api/v1/...; the `path` segments after /api/backend are handed to proxyToBackend()
  * (lib/server/proxy.ts), which validates them, forwards the request and maps the response back.
  * This file only resolves configuration (BACKEND_ORIGIN, timeout) and the client IP.

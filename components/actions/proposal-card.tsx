@@ -10,8 +10,8 @@
  *   - Reject  -> `POST /actions/{id}/reject` (useRejectAction)
  *   - Approve -> `POST /actions/{id}/approve` (useApproveAction), which executes the operations server-side
  *
- * Used by app/(app)/actions/page.tsx (proposal list) and components/voice/assistant-panel.tsx (fresh
- * proposal right after extraction). All validation of approvability is the backend's: the card only
+ * Used by app/(app)/actions/page.tsx (proposal list): proposals waiting for confirmation or for the owner
+ * (staff requests, operations the voice agent read back). All validation of approvability is the backend's: the card only
  * mirrors `can_approve`, `warnings[].blocking` and `missing_fields` from the response.
  */
 import { AlertTriangle, Check, CheckCircle2, Pencil, Quote, X, XCircle } from "lucide-react";

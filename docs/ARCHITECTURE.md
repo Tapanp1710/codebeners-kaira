@@ -80,15 +80,30 @@ contracts/                   imported backend contract + version record
 
 ## Voice and approvals
 
-The orb (`components/voice/voice-orb.tsx`) shows idle / listening / processing / ready / speaking / error.
-Recording starts only on a tap, stops on a second tap or at Sarvam's 30 s limit, and releases the microphone
-immediately. Audio goes to `POST /voice/transcribe` as multipart `file` + `language_code`. The transcript is editable, then
-`POST /assistant/extract`. Proposals (`ProposalCard`) show the transcript, intent, customer/invoice resolution with
+The live voice agent (contract: `contracts/VOICE_AGENT.md`, types: `lib/agent/protocol.ts`) is the primary
+interface. `components/agent/agent-provider.tsx` mounts one `AgentEngine` (`lib/agent/engine.ts`) in the `(app)`
+layout, so a live session survives navigation:
+
+* The microphone opens only when the user enables the live session (explicit click). An AudioWorklet
+  (`public/worklets/kaira-mic-worklet.js`) downmixes and resamples to 16 kHz Int16 PCM in ~100 ms frames, streamed
+  over a WebSocket (`lib/agent/socket.ts`) to the backend, which bridges to Sarvam realtime STT. A short pre-roll and a
+  client energy VAD drive the orb and early local barge-in; recognition is Sarvam's.
+* The WebSocket is authenticated with a 60 s single-use ticket from `POST /agent/session` (Next.js route handlers
+  cannot proxy WebSockets). Reconnects request a fresh ticket.
+* Replies arrive as PCM frames and are scheduled gaplessly (`lib/agent/player.ts`); `tts.stop` (server barge-in)
+  or local speech stops playback instantly.
+* `reduceAgentEvent` (`lib/agent/reducer.ts`) turns server events into the orb state, transcript, activity feed and
+  side effects (refresh ledger queries after writes, `navigate` to internal paths only).
+* Typed input (`sendText`) uses the same conversation over the socket, or `POST /agent/turn` without it.
+
+UI: `/agent` (`components/agent/agent-home.tsx`, `kaira-orb.tsx`, `activity-feed.tsx`, `conversation.tsx`) and the
+`AgentDock` on every other page. Operations the agent reads back for confirmation, and staff requests, appear on
+the Approvals page. Proposals (`ProposalCard`) show the transcript, intent, customer/invoice resolution with
 candidates, amounts, computed values (remaining balance, balance after), evidence with "found in transcript", warnings
 (blocking ones highlighted), and confidence. Edit sends the full operation list to `PATCH /actions/{id}`.
 Approve and reject wait for the backend and are disabled while in flight. Success is shown only when the
-returned status is `executed`. Answers can be read aloud through `POST /voice/speak` (base64 audio).
-When the backend reports `voice_provider: not_configured`, the UI says so and keeps typed English input working.
+returned status is `executed`. When the backend reports `voice_provider: not_configured`, the UI says so and keeps
+typed input working.
 
 ## Design system
 
