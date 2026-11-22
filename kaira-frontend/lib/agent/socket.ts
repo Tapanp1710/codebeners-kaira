@@ -3,6 +3,12 @@
  * resume_session_id each time) until disconnect() or a fatal error. Outgoing mic audio goes through a bounded
  * backlog that drops the oldest frames when the socket is backed up.
  *
+ * Dead connections: a socket can stay "OPEN" for minutes after the network silently went away. Every ping arms a
+ * watchdog; if nothing at all arrives from the server within PONG_TIMEOUT_MS the socket is treated as lost and
+ * reconnected (which also lets the engine replay unfinished typed turns over REST). probe() pings at once (used
+ * right after sending a typed turn). setOffline(true) (browser `offline` event) drops the socket at once and pauses
+ * reconnect attempts so they are not burned while there is no network; setOffline(false) reconnects immediately.
+ *
  * Dependencies (ticket request, WebSocket constructor, randomness) are injected so the class can be tested
  * without a network.
  */
@@ -54,6 +60,8 @@ export type AgentSocketHandlers = {
 
 const OPEN = 1;
 export const PING_INTERVAL_MS = 20_000;
+/** No frame at all from the server this long after a ping: the connection is considered dead. */
+export const PONG_TIMEOUT_MS = 10_000;
 /** Stop handing frames to the socket above this many queued bytes (~2 s of 16 kHz Int16 audio). */
 export const HIGH_WATER_BYTES = 64_000;
 /** Backlog kept while backed up: 20 frames of ~100 ms. */
@@ -67,6 +75,12 @@ export class AgentSocket {
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private offline = false;
+  /** A reconnect is due but waits for the network to come back. */
+  private waitingForNetwork = false;
+  /** Generation of open(): a stale attempt (superseded or disconnected meanwhile) abandons itself. */
+  private openSeq = 0;
   private sessionId: string | null = null;
   private muted = false;
   private fatalSeen = false;
@@ -102,6 +116,7 @@ export class AgentSocket {
   /** Closes on purpose; no reconnect. */
   disconnect(): void {
     this.stopped = true;
+    this.openSeq++;
     this.clearTimers();
     this.backlog.clear();
     const ws = this.ws;
@@ -115,6 +130,35 @@ export class AgentSocket {
       }
     }
     this.handlers.onStatus("closed");
+  }
+
+  /** Pings now and arms the dead-connection watchdog (no-op if not open or a ping is already outstanding). */
+  probe(): void {
+    if (!this.isOpen || this.pongTimer) return;
+    this.ping();
+  }
+
+  /**
+   * Browser connectivity changed. Offline: the current socket is dropped at once (the UI shows reconnecting) and
+   * reconnecting waits. Online: reconnect now, with a fresh attempt budget.
+   */
+  setOffline(offline: boolean): void {
+    if (offline === this.offline) return;
+    this.offline = offline;
+    if (this.stopped) return;
+    if (offline) {
+      if (this.ws) this.dropConnection();
+      return;
+    }
+    if (this.waitingForNetwork || this.reconnectTimer) {
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.waitingForNetwork = false;
+      this.attempt = 0;
+      void this.open("reconnecting");
+    } else {
+      this.probe();
+    }
   }
 
   /** Sends a JSON control message if open. Returns whether it was sent. */
@@ -146,8 +190,42 @@ export class AgentSocket {
   private clearTimers(): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.pingTimer) clearInterval(this.pingTimer);
+    this.clearPong();
     this.reconnectTimer = null;
     this.pingTimer = null;
+    this.waitingForNetwork = false;
+  }
+
+  private clearPong(): void {
+    if (this.pongTimer) clearTimeout(this.pongTimer);
+    this.pongTimer = null;
+  }
+
+  private ping(): void {
+    if (!this.send({ type: "ping" })) return;
+    if (this.pongTimer) return;
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      if (!this.stopped && this.ws) this.dropConnection();
+    }, PONG_TIMEOUT_MS);
+  }
+
+  /** Abandons the current socket (dead or offline) and reconnects like after an unexpected close. */
+  private dropConnection(): void {
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+      try {
+        ws.close(4000, "connection lost");
+      } catch {
+        /* already closed */
+      }
+    }
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
+    this.clearPong();
+    this.scheduleReconnect();
   }
 
   private fatal(code: string, message: string): void {
@@ -157,16 +235,17 @@ export class AgentSocket {
   }
 
   private async open(status: "connecting" | "reconnecting"): Promise<void> {
+    const seq = ++this.openSeq;
     this.handlers.onStatus(status);
     let ticket: AgentSessionTicket;
     try {
       ticket = await this.deps.requestTicket(this.sessionId);
     } catch (error) {
-      if (this.stopped) return;
+      if (this.stopped || seq !== this.openSeq) return;
       if (error instanceof FatalSocketError) return this.fatal(error.code, error.message);
       return this.scheduleReconnect();
     }
-    if (this.stopped) return;
+    if (this.stopped || seq !== this.openSeq) return;
     this.sessionId = ticket.session_id;
     this.handlers.onSession(ticket);
 
@@ -183,9 +262,11 @@ export class AgentSocket {
       this.handlers.onStatus("open");
       if (this.muted) ws.send(JSON.stringify({ type: "mute" } satisfies ClientMessage));
       if (this.pingTimer) clearInterval(this.pingTimer);
-      this.pingTimer = setInterval(() => this.send({ type: "ping" }), PING_INTERVAL_MS);
+      this.pingTimer = setInterval(() => this.ping(), PING_INTERVAL_MS);
     };
     ws.onmessage = (ev: MessageEvent) => {
+      if (this.ws !== ws) return;
+      this.clearPong(); // anything from the server proves the connection is alive
       if (typeof ev.data === "string") {
         const event = parseServerFrame(ev.data);
         if (!event) return;
@@ -207,6 +288,7 @@ export class AgentSocket {
       this.ws = null;
       if (this.pingTimer) clearInterval(this.pingTimer);
       this.pingTimer = null;
+      this.clearPong();
       if (this.stopped || this.fatalSeen) return;
       // Any close we did not ask for (including a 1000 without a fatal error, or 1008 for an expired ticket)
       // reconnects with a fresh ticket while the user still wants the live session.
@@ -215,7 +297,13 @@ export class AgentSocket {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped) return;
+    if (this.stopped || this.reconnectTimer) return;
+    if (this.offline) {
+      // No network: wait for setOffline(false) instead of spending the attempt budget.
+      this.waitingForNetwork = true;
+      this.handlers.onStatus("reconnecting");
+      return;
+    }
     if (this.attempt >= MAX_RECONNECT_ATTEMPTS) {
       return this.fatal("CONNECTION_LOST", "Lost the connection to KAIRA's live voice. Turn live voice on again to retry.");
     }

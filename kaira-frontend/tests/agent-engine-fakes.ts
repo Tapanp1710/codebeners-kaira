@@ -85,6 +85,8 @@ export class FakeAudioContext {
   destination = node();
   sources: FakeSource[] = [];
   closed = false;
+  resumes = 0;
+  onstatechange: (() => void) | null = null;
   createGain() {
     return { ...node(), gain: { value: 1, cancelScheduledValues: () => {}, setTargetAtTime: () => {} } };
   }
@@ -100,6 +102,7 @@ export class FakeAudioContext {
     return s;
   }
   resume() {
+    this.resumes++;
     this.state = "running";
     return Promise.resolve();
   }
@@ -132,5 +135,64 @@ export class FakeMic {
   /** Emits one 100 ms frame (1600 samples) of constant value. */
   frame(value: number, rms: number) {
     this.onFrame?.({ pcm: new Int16Array(1600).fill(value).buffer, rms });
+  }
+}
+
+/** Scriptable cross-tab lock (lib/agent/tab-lock.ts LiveTabLock). */
+export class FakeTabLock {
+  held = false;
+  available = true;
+  acquires = 0;
+  releases = 0;
+  disposed = false;
+  /** When set, acquire() waits for this promise before answering. */
+  gate: Promise<void> | null = null;
+  private listeners = new Set<(elsewhere: boolean) => void>();
+  async acquire() {
+    this.acquires++;
+    if (this.gate) await this.gate;
+    if (!this.available) return false;
+    this.held = true;
+    return true;
+  }
+  release() {
+    if (!this.held) return;
+    this.held = false;
+    this.releases++;
+  }
+  watch(listener: (elsewhere: boolean) => void) {
+    this.listeners.add(listener);
+    listener(!this.available);
+    return () => this.listeners.delete(listener);
+  }
+  dispose() {
+    this.release();
+    this.disposed = true;
+  }
+  get watchers() {
+    return this.listeners.size;
+  }
+  /** Another tab takes or gives up the live session. */
+  setElsewhere(elsewhere: boolean) {
+    this.available = !elsewhere;
+    this.listeners.forEach((l) => l(elsewhere));
+  }
+}
+
+/** Scriptable connectivity (lib/agent/engine.ts NetworkMonitor). */
+export class FakeNetwork {
+  online = true;
+  private listeners = new Set<(online: boolean) => void>();
+  isOnline = () => this.online;
+  subscribe = (listener: (online: boolean) => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+  get subscribers() {
+    return this.listeners.size;
+  }
+  set(online: boolean) {
+    this.online = online;
+    this.listeners.forEach((l) => l(online));
   }
 }

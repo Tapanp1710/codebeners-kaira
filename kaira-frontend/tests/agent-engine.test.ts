@@ -5,18 +5,22 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AgentEngine, LOCAL_BARGE_STOP_MS, type EngineDeps } from "@/lib/agent/engine";
+import { AgentEngine, LIVE_ELSEWHERE_MESSAGE, LOCAL_BARGE_STOP_MS, PREROLL_MS, type EngineDeps } from "@/lib/agent/engine";
 import type { MicCapture } from "@/lib/agent/mic";
 import { deriveOrb, type AgentIntent } from "@/lib/agent/reducer";
 import { ApiError } from "@/lib/api/errors";
 
-import { FakeAudioContext, FakeMic, FakeSocket, ticket } from "./agent-engine-fakes";
+import { FakeAudioContext, FakeMic, FakeNetwork, FakeSocket, FakeTabLock, ticket } from "./agent-engine-fakes";
 
 let mic: FakeMic;
 let ctx: FakeAudioContext;
+let lock: FakeTabLock;
+let network: FakeNetwork;
 
 function makeEngine(overrides: Partial<EngineDeps> = {}) {
   mic = new FakeMic();
+  lock = new FakeTabLock();
+  network = new FakeNetwork();
   const deps: EngineDeps = {
     startSession: vi.fn(async () => ticket()),
     postTurn: vi.fn(async (text: string, turnId: string) => ({
@@ -32,6 +36,8 @@ function makeEngine(overrides: Partial<EngineDeps> = {}) {
     createMic: () => mic as unknown as MicCapture,
     storage: () => window.sessionStorage,
     origin: () => "http://localhost:3000",
+    createTabLock: () => lock,
+    network,
     ...overrides,
   };
   const engine = new AgentEngine(deps);
@@ -69,20 +75,24 @@ describe("AgentEngine live session", () => {
     expect(deriveOrb(engine.getSnapshot())).toBe("connecting");
     await p;
     expect(mic.started).toBe(true);
-    // Frames before the socket opens go to the 400 ms pre-roll (oldest dropped).
-    for (let i = 1; i <= 6; i++) mic.frame(i, 0.001);
+    // Frames before the socket opens go to the 1.5 s pre-roll (oldest dropped): 20 frames of 100 ms -> last 15.
+    for (let i = 1; i <= 20; i++) mic.frame(i, 0.001);
     await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
     expect(ws().url).toBe("ws://backend.test/api/v1/agent/live?ticket=tk1");
     ws().serverOpen();
     expect(deriveOrb(engine.getSnapshot())).toBe("listening");
-    mic.frame(7, 0.001);
+    mic.frame(21, 0.001);
     const sent = ws().binary();
-    expect(sent).toHaveLength(2);
-    const preroll = new Int16Array(sent[0]);
-    expect(preroll.length).toBe(6400);
-    expect(preroll[0]).toBe(3);
-    expect(preroll[6399]).toBe(6);
-    expect(new Int16Array(sent[1])[0]).toBe(7);
+    // Flushed in 250 ms chunks (each well under the server's 1 s frame cap), oldest first, before the live frame.
+    expect(sent.map((b) => b.byteLength)).toEqual([8000, 8000, 8000, 8000, 8000, 8000, 3200]);
+    const preroll = new Int16Array(sent.slice(0, 6).flatMap((b) => Array.from(new Int16Array(b))));
+    expect(preroll.length).toBe((16000 * PREROLL_MS) / 1000);
+    expect(preroll[0]).toBe(6);
+    expect(preroll[1599]).toBe(6);
+    expect(preroll[1600]).toBe(7);
+    expect(preroll[preroll.length - 1]).toBe(20);
+    expect(new Int16Array(sent[6])[0]).toBe(21);
+    expect(lock.held).toBe(true);
     expect(window.sessionStorage.getItem("kaira.agent.live")).toBe("1");
 
     engine.disable();
@@ -92,6 +102,8 @@ describe("AgentEngine live session", () => {
     expect(engine.getSnapshot().live).toBe(false);
     expect(deriveOrb(engine.getSnapshot())).toBe("off");
     expect(window.sessionStorage.getItem("kaira.agent.live")).toBeNull();
+    expect(lock.held).toBe(false);
+    expect(network.subscribers).toBe(0);
   });
 
   it("mute stops frames and tells the server", async () => {
@@ -301,5 +313,264 @@ describe("mount", () => {
     expect(mic.stopped).toBe(true);
     expect(ws().closedWith).toBe(1000);
     expect(window.sessionStorage.getItem("kaira.agent.live")).toBe("1");
+  });
+});
+
+describe("first syllable: nothing gates the stream", () => {
+  it("streams every frame while live, silent or loud, whatever the client VAD says", async () => {
+    const { engine } = makeEngine();
+    await goLive(engine);
+    // Quiet room (client VAD: no speech), then a loud onset, then quiet again: every frame goes out, in order.
+    const values = [1, 2, 3, 4, 5, 6, 7, 8];
+    const levels = [0.0005, 0.0005, 0.0005, 0.3, 0.3, 0.0005, 0.0005, 0.0005];
+    values.forEach((v, i) => mic.frame(v, levels[i]));
+    expect(ws().binary().map((b) => new Int16Array(b)[0])).toEqual(values);
+    engine.disable();
+  });
+
+  it("keeps the pre-roll through a reconnect and flushes it, in order, on the new socket", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    const first = ws();
+    mic.frame(1, 0.001);
+    first.serverClose(1006);
+    expect(engine.getSnapshot().connection).toBe("reconnecting");
+    mic.frame(2, 0.2); // the user keeps talking while the socket is down
+    mic.frame(3, 0.2);
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2), { timeout: 3000 });
+    expect(deps.startSession).toHaveBeenLastCalledWith(ticket().session_id);
+    ws().serverOpen();
+    mic.frame(4, 0.2);
+    const samples = ws()
+      .binary()
+      .flatMap((b) => Array.from(new Int16Array(b)));
+    expect(samples.length).toBe(3 * 1600);
+    expect([samples[0], samples[1600], samples[3200]]).toEqual([2, 3, 4]);
+    expect(first.binary()).toHaveLength(1);
+    engine.disable();
+  });
+
+  it("mute drops the pre-roll and sends nothing until unmuted", async () => {
+    const { engine } = makeEngine();
+    await engine.enable();
+    mic.frame(1, 0.2);
+    engine.setMuted(true);
+    mic.frame(2, 0.2);
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    ws().serverOpen();
+    expect(ws().binary()).toHaveLength(0);
+    expect(ws().json()).toContainEqual({ type: "mute" });
+    engine.setMuted(false);
+    mic.frame(3, 0.2);
+    expect(ws().binary().map((b) => new Int16Array(b)[0])).toEqual([3]);
+    engine.disable();
+  });
+});
+
+describe("cross-tab: one live microphone session per browser", () => {
+  it("another tab holding the session: enable refuses without opening the mic and typed input keeps working", async () => {
+    const { engine, deps } = makeEngine();
+    lock.available = false;
+    await engine.enable();
+    expect(mic.started).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(ctx.closed).toBe(true);
+    expect(deps.startSession).not.toHaveBeenCalled();
+    const s = engine.getSnapshot();
+    expect(s.live).toBe(false);
+    expect(s.liveElsewhere).toBe(true);
+    expect(s.error).toEqual({ code: "live_elsewhere", message: LIVE_ELSEWHERE_MESSAGE, fatal: false });
+    expect(deriveOrb(s)).toBe("off");
+    expect(window.sessionStorage.getItem("kaira.agent.live")).toBeNull();
+
+    await engine.sendText("how much does Ramesh owe me?");
+    expect(deps.postTurn).toHaveBeenCalledTimes(1);
+    expect(engine.getSnapshot().lastReply).toBe("echo how much does Ramesh owe me?");
+  });
+
+  it("follows the other tab via watch(): notice shown on attach, cleared when it lets go; enable then works", async () => {
+    const { engine } = makeEngine();
+    lock.available = false;
+    engine.attach();
+    expect(engine.getSnapshot().liveElsewhere).toBe(true);
+    await engine.enable();
+    expect(engine.getSnapshot().error?.code).toBe("live_elsewhere");
+    lock.setElsewhere(false);
+    expect(engine.getSnapshot().liveElsewhere).toBe(false);
+    expect(engine.getSnapshot().error).toBeNull();
+    await goLive(engine);
+    expect(engine.getSnapshot().live).toBe(true);
+    expect(lock.held).toBe(true);
+    engine.detach();
+    expect(lock.held).toBe(false);
+    expect(lock.disposed).toBe(true);
+    expect(lock.watchers).toBe(0);
+  });
+
+  it("releases the lock on a fatal error and on a lost microphone", async () => {
+    const { engine } = makeEngine();
+    await goLive(engine);
+    ws().serverJson({ type: "error", source: "config", code: "X", message: "x", fatal: true });
+    expect(lock.held).toBe(false);
+    await goLive(engine);
+    expect(lock.held).toBe(true);
+    mic.onEnded?.();
+    expect(lock.held).toBe(false);
+    expect(engine.getSnapshot().error?.code).toBe("mic_lost");
+  });
+
+  it("disable while the lock request is pending releases it once granted and never opens the mic", async () => {
+    const { engine } = makeEngine();
+    let open!: () => void;
+    lock.gate = new Promise<void>((r) => (open = r));
+    const p = engine.enable();
+    engine.disable();
+    open();
+    await p;
+    expect(lock.held).toBe(false);
+    expect(mic.started).toBe(false);
+    expect(engine.getSnapshot().live).toBe(false);
+  });
+});
+
+describe("network loss", () => {
+  it("offline drops the socket at once and waits; online reconnects with a fresh ticket and the session id", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    const first = ws();
+    network.set(false);
+    expect(first.closedWith).toBe(4000);
+    expect(engine.getSnapshot().connection).toBe("reconnecting");
+    expect(deriveOrb(engine.getSnapshot())).toBe("reconnecting");
+    mic.frame(9, 0.2); // kept in the pre-roll
+    await new Promise((r) => setTimeout(r, 50));
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(deps.startSession).toHaveBeenCalledTimes(1);
+    network.set(true);
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+    expect(deps.startSession).toHaveBeenLastCalledWith(ticket().session_id);
+    ws().serverOpen();
+    expect(new Int16Array(ws().binary()[0])[0]).toBe(9);
+    expect(deriveOrb(engine.getSnapshot())).toBe("listening");
+    engine.disable();
+  });
+
+  it("a typed turn on a silently dead socket is replayed once over REST with the same turn_id", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    vi.useFakeTimers();
+    const dead = ws();
+    await engine.sendText("Ramesh paid 5000 today");
+    const sentText = dead.json().find((m) => m.type === "text");
+    expect(dead.json().filter((m) => m.type === "ping")).toHaveLength(1); // probe right after the turn
+    expect(deps.postTurn).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10_000); // no pong
+    expect(dead.closedWith).toBe(4000);
+    expect(deps.postTurn).toHaveBeenCalledTimes(1);
+    expect(deps.postTurn).toHaveBeenCalledWith("Ramesh paid 5000 today", sentText?.turn_id);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(deps.postTurn).toHaveBeenCalledTimes(1);
+    const users = engine.getSnapshot().transcript.filter((e) => e.role === "user");
+    expect(users).toHaveLength(1);
+    engine.disable();
+  });
+
+  it("a pong keeps the socket: nothing is replayed", async () => {
+    const { engine, deps } = makeEngine();
+    await goLive(engine);
+    vi.useFakeTimers();
+    await engine.sendText("hello");
+    ws().serverJson({ type: "pong" });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(ws().closedWith).toBeNull();
+    expect(deps.postTurn).not.toHaveBeenCalled();
+    engine.disable();
+  });
+});
+
+describe("playback and listening", () => {
+  it("listening resumes after tts.end even if the audio sources never report ended", async () => {
+    const { engine } = makeEngine();
+    await goLive(engine);
+    vi.useFakeTimers();
+    ws().serverJson({ type: "tts.start", turn_id: "t1", sample_rate: 16000, speaker: "s", language: "en-IN" });
+    ws().serverBinary(new ArrayBuffer(3200));
+    ws().serverJson({ type: "tts.end", turn_id: "t1" });
+    expect(deriveOrb(engine.getSnapshot())).toBe("speaking");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(deriveOrb(engine.getSnapshot())).toBe("listening");
+    expect(ctx.sources[0].stopped).toBe(true);
+    engine.disable();
+  });
+
+  it("after a local barge-in, late frames of the interrupted reply are not played; the next reply is", async () => {
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000);
+    const { engine } = makeEngine();
+    await goLive(engine);
+    for (let i = 0; i < 3; i++) mic.frame(0, 0.001);
+    ws().serverJson({ type: "tts.start", turn_id: "t1", sample_rate: 16000, speaker: "s", language: "en-IN" });
+    ws().serverBinary(new ArrayBuffer(3200));
+    mic.frame(5000, 0.3);
+    now.mockReturnValue(1_000 + LOCAL_BARGE_STOP_MS);
+    mic.frame(5000, 0.3);
+    expect(ws().json()).toContainEqual({ type: "interrupt" });
+    ws().serverBinary(new ArrayBuffer(3200));
+    expect(ctx.sources).toHaveLength(1);
+    ws().serverJson({ type: "tts.stop", reason: "user" });
+    ws().serverJson({ type: "tts.start", turn_id: "t2", sample_rate: 16000, speaker: "s", language: "en-IN" });
+    ws().serverBinary(new ArrayBuffer(3200));
+    expect(ctx.sources).toHaveLength(2);
+    expect(deriveOrb(engine.getSnapshot())).toBe("speaking");
+    engine.disable();
+    now.mockRestore();
+  });
+
+  it("resumes a suspended or interrupted AudioContext while live, not after disable", async () => {
+    const { engine } = makeEngine();
+    await goLive(engine);
+    const c = ctx;
+    const before = c.resumes;
+    c.state = "suspended";
+    c.onstatechange?.();
+    expect(c.resumes).toBe(before + 1);
+    (c as unknown as { state: string }).state = "interrupted";
+    c.onstatechange?.();
+    expect(c.resumes).toBe(before + 2);
+    engine.disable();
+    expect(c.onstatechange).toBeNull();
+  });
+});
+
+describe("levels store", () => {
+  it("without a levels subscriber, levels update the main state (compatibility)", async () => {
+    const { engine } = makeEngine();
+    await goLive(engine);
+    mic.frame(1000, 0.2);
+    await vi.waitFor(() => expect(engine.getSnapshot().micLevel).toBeGreaterThan(0));
+    expect(engine.getLevels().mic).toBe(engine.getSnapshot().micLevel);
+    engine.disable();
+    expect(engine.getLevels()).toEqual({ mic: 0, output: 0 });
+  });
+
+  it("with a levels subscriber, only the levels store changes; the main state is not touched 20x/s", async () => {
+    const { engine } = makeEngine();
+    await goLive(engine);
+    for (let i = 0; i < 4; i++) mic.frame(1000, 0.01); // settle the client VAD on a quiet room first
+    let levelNotifications = 0;
+    let stateNotifications = 0;
+    const unsubLevels = engine.subscribeLevels(() => levelNotifications++);
+    const unsubState = engine.subscribe(() => stateNotifications++);
+    for (let i = 0; i < 10; i++) {
+      mic.frame(1000, 0.01);
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    await vi.waitFor(() => expect(engine.getLevels().mic).toBeGreaterThan(0));
+    expect(levelNotifications).toBeGreaterThan(2);
+    expect(engine.getSnapshot().micLevel).toBe(0);
+    expect(stateNotifications).toBe(0);
+    unsubLevels();
+    unsubState();
+    engine.disable();
   });
 });
