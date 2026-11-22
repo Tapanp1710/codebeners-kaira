@@ -3,18 +3,19 @@
  * activity feed and the app shell's single agent interface. useAgent() is mocked (vi.mock of the provider module),
  * so these tests pin the UI's behaviour against the contract in lib/agent/protocol.ts, not a voice engine.
  */
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import { ActivityFeed } from "@/components/agent/activity-feed";
 import { AgentDock } from "@/components/agent/agent-dock";
 import { AgentHome } from "@/components/agent/agent-home";
-import { KairaOrb, ORB_STATUS } from "@/components/agent/kaira-orb";
+import { KairaOrb, LiveKairaOrb, ORB_STATUS } from "@/components/agent/kaira-orb";
 import { AppShell } from "@/components/layout/app-shell";
+import { Providers } from "@/components/providers";
 import type { ActivityItem, AgentContextValue, OrbState } from "@/lib/agent/protocol";
 
-import { envelope } from "./fixtures";
+import { envelope, ownerSession } from "./fixtures";
 import { pathOf, renderApp } from "./render";
 
 const mocks = vi.hoisted(() => ({ agent: null as AgentContextValue | null, pathname: "/agent" }));
@@ -26,6 +27,19 @@ vi.mock("@/components/agent/agent-provider", () => ({
     return mocks.agent;
   },
 }));
+
+// Counts conversation timestamp formatting (one call per rendered transcript entry) to observe re-renders.
+const fmt = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("@/lib/format/dates", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/format/dates")>();
+  return {
+    ...real,
+    formatDateTime: (...args: Parameters<typeof real.formatDateTime>) => {
+      fmt.calls++;
+      return real.formatDateTime(...args);
+    },
+  };
+});
 
 vi.mock("next/navigation", () => ({
   usePathname: () => mocks.pathname,
@@ -123,6 +137,27 @@ describe("KairaOrb", () => {
     render(<KairaOrb state="hearing" micLevel={0.9} outputLevel={0} size="hero" />);
     expect(raf).not.toHaveBeenCalled();
     expect(clearRect).toHaveBeenCalledTimes(1);
+  });
+
+  it("LiveKairaOrb takes its levels from the live session (useOrbLevels) and scales the core with them", () => {
+    getContext.mockReturnValue(fakeContext());
+    let frame: FrameRequestCallback | null = null;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((cb: FrameRequestCallback) => {
+        frame = cb;
+        return 1;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    mocks.agent = makeAgent({ live: true, orb: "hearing", micLevel: 1 });
+    render(<LiveKairaOrb state="hearing" size="hero" />);
+    const orb = screen.getByRole("img", { name: "KAIRA: Hearing you" });
+    for (let i = 0; i < 30; i++) frame!(16 * (i + 1));
+    const core = orb.querySelectorAll("span")[1] as HTMLElement;
+    const scale = Number(/scale\(([\d.]+)\)/.exec(core.style.transform)?.[1]);
+    expect(scale).toBeGreaterThan(1.05);
   });
 });
 
@@ -284,7 +319,84 @@ describe("AgentHome", () => {
   });
 });
 
+describe("AgentHome rendering and announcements", () => {
+  const transcript = [
+    { id: "t1", role: "user" as const, text: "How much does Ramesh owe?", language: "en-IN", at: "2026-11-22T10:00:00Z", mode: "voice" as const },
+    { id: "t1", role: "assistant" as const, text: "Ramesh owes you ₹18,000.00.", language: "en-IN", at: "2026-11-22T10:00:02Z" },
+  ];
+
+  it("does not re-render the conversation on an audio-level tick, only when the transcript changes", () => {
+    const agent = makeAgent({ live: true, orb: "listening", voiceConfigured: true, transcript });
+    mocks.agent = agent;
+    const ui = () => (
+      <Providers session={ownerSession}>
+        <AgentHome />
+      </Providers>
+    );
+    fmt.calls = 0;
+    const { rerender } = render(ui());
+    const afterMount = fmt.calls;
+    expect(afterMount).toBeGreaterThanOrEqual(2);
+
+    // Level ticks: new context values that keep the same transcript/activity arrays.
+    mocks.agent = { ...agent, micLevel: 0.62, outputLevel: 0.1 };
+    rerender(ui());
+    mocks.agent = { ...agent, micLevel: 0.3, outputLevel: 0.4 };
+    rerender(ui());
+    expect(fmt.calls).toBe(afterMount);
+
+    // A new turn does re-render it.
+    mocks.agent = { ...agent, transcript: [...transcript, { id: "t2", role: "user", text: "Thanks", language: "en-IN", at: "2026-11-22T10:01:00Z", mode: "text" }] };
+    rerender(ui());
+    expect(fmt.calls).toBeGreaterThan(afterMount);
+    expect(screen.getAllByTestId("transcript-entry")).toHaveLength(3);
+  });
+
+  it("keeps an always-mounted polite live region for the reply and marks the stage as a dark surface", () => {
+    renderApp(<AgentHome />, { handler });
+    const stage = screen.getByTestId("agent-stage");
+    expect(stage).toHaveAttribute("data-surface", "dark");
+    const region = stage.querySelector('[aria-live="polite"][aria-atomic="true"]');
+    expect(region).not.toBeNull();
+    expect(region).toBeEmptyDOMElement();
+  });
+
+  it("announces the reply but not the word-by-word partial caption", () => {
+    mocks.agent = makeAgent({ partial: "ramesh paid", lastReply: "Recorded ₹5,000.00 from Ramesh Kumar." });
+    renderApp(<AgentHome />, { handler });
+    const reply = screen.getByTestId("agent-last-reply");
+    expect(reply.parentElement).toHaveAttribute("aria-live", "polite");
+    expect(reply.parentElement).toHaveAttribute("aria-atomic", "true");
+    expect(screen.getByTestId("agent-partial").closest("[aria-live]")).toBeNull();
+  });
+
+  it("offers to resume a live session that was on before a reload", async () => {
+    const agent = makeAgent({ resumeAvailable: true });
+    mocks.agent = agent;
+    renderApp(<AgentHome />, { handler });
+    const toggle = screen.getByTestId("agent-live-toggle");
+    expect(toggle).toHaveTextContent("Resume live session");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("agent-mic-notice")).toHaveTextContent("The microphone is off. Your live session paused when the page reloaded");
+    await userEvent.click(toggle);
+    expect(agent.enable).toHaveBeenCalledOnce();
+  });
+});
+
 describe("AgentDock", () => {
+  it("announces KAIRA's reply through a hidden live region and offers resume", () => {
+    mocks.agent = makeAgent({ resumeAvailable: true, lastReply: "Ramesh owes you ₹18,000.00.", partial: "and suresh" });
+    renderApp(<AgentDock />, { handler });
+    const announcer = screen.getByTestId("dock-reply-announcer");
+    expect(announcer).toHaveAttribute("aria-live", "polite");
+    expect(announcer).toHaveTextContent("KAIRA: Ramesh owes you ₹18,000.00.");
+    // The visible caption keeps the partial (and starts with the speaker, as the e2e helper expects).
+    expect(screen.getByTestId("dock-caption")).toHaveTextContent(/^You: and suresh$/);
+    expect(screen.getByTestId("dock-caption").closest("[aria-live]")).toBeNull();
+    expect(screen.getByTestId("dock-live-toggle")).toHaveAccessibleName("Resume live session");
+    expect(screen.getByTestId("agent-dock")).toHaveAttribute("data-surface", "dark");
+  });
+
   it("offers the same session compactly: state, caption, live switch and typed input", async () => {
     const agent = makeAgent({ live: true, orb: "listening", lastReply: "Done. I recorded ₹5,000.00 from Ramesh Kumar." });
     mocks.agent = agent;
@@ -338,5 +450,41 @@ describe("AppShell", () => {
     mocks.pathname = "/agent";
     renderApp(<AppShell><h1>KAIRA</h1></AppShell>, { handler });
     expect(screen.queryByTestId("agent-dock")).not.toBeInTheDocument();
+  });
+
+  it("closes the alerts and account menus with Escape (focus returns) or an outside press", async () => {
+    mocks.pathname = "/customers";
+    renderApp(<AppShell><h1>Customers</h1></AppShell>, { handler });
+    const bell = screen.getByRole("button", { name: /^Alerts/ });
+    await userEvent.click(bell);
+    expect(bell).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("No alerts.")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(bell).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("No alerts.")).not.toBeInTheDocument();
+    expect(bell).toHaveFocus();
+
+    // The account button is named even on phones, where the visible name is hidden.
+    const account = screen.getByRole("button", { name: `${ownerSession.user.name}, account menu` });
+    await userEvent.click(account);
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    fireEvent.pointerDown(screen.getByRole("heading", { name: "Customers" }));
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+
+  it("moves focus into the mobile navigation drawer and closes it with Escape", async () => {
+    mocks.pathname = "/customers";
+    renderApp(<AppShell><h1>Customers</h1></AppShell>, { handler });
+    const open = screen.getByRole("button", { name: "Open navigation" });
+    expect(open).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(open);
+    const drawer = screen.getByRole("dialog", { name: "Navigation" });
+    expect(within(drawer).getAllByRole("link")[0]).toHaveFocus();
+    expect(within(drawer).getByRole("navigation")).toHaveAttribute("data-surface", "dark");
+    await act(async () => {
+      await userEvent.keyboard("{Escape}");
+    });
+    expect(screen.queryByRole("dialog", { name: "Navigation" })).not.toBeInTheDocument();
+    expect(open).toHaveFocus();
   });
 });
