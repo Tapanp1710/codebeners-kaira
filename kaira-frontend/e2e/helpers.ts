@@ -2,10 +2,20 @@
  * Shared Playwright helpers. Credentials come only from E2E_EMAIL / E2E_PASSWORD (never committed);
  * use an owner account on a non-production backend, because the tests create real records.
  */
-import { expect, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 
 export const EMAIL = process.env.E2E_EMAIL ?? "";
 export const PASSWORD = process.env.E2E_PASSWORD ?? "";
+
+/**
+ * Tests that need KAIRA's live LLM (the typed agent path, POST /agent/turn backed by Sarvam) run only when
+ * E2E_LIVE_AGENT=1: CI has no SARVAM_API_KEY, and without it the agent cannot plan tool calls. Call inside a test
+ * (or at file / describe level) to skip with an explicit reason instead of failing.
+ */
+export const LIVE_AGENT = process.env.E2E_LIVE_AGENT === "1";
+export function requireLiveAgent() {
+  test.skip(!LIVE_AGENT, "Needs the live agent LLM (backend with SARVAM_API_KEY); set E2E_LIVE_AGENT=1.");
+}
 
 /** Fails early with a clear message instead of later on the login form. */
 export function requireCredentials() {
@@ -110,7 +120,41 @@ export async function settleLatestWrite(page: Page, proposalText: string): Promi
   await page.waitForURL((u) => u.pathname === "/actions");
   const card = page.getByTestId("proposal-card").filter({ hasText: proposalText }).first();
   await expect(card).toHaveAttribute("data-status", "pending");
-  await card.getByRole("button", { name: /approve/i }).click();
-  await expect(card).toHaveAttribute("data-status", "executed");
+  const result = await decideProposal(page, card, "approve");
+  expect(result.status, "approved proposal did not execute").toBe("executed");
   return "approved";
+}
+
+/**
+ * Clicks Approve or Reject on a pending proposal card on /actions and verifies the outcome in the UI.
+ *
+ * The decision is read from the backend's own response (POST /actions/{id}/approve|reject), not from the card on
+ * the "Awaiting approval" tab: on success the page refetches the pending list (the mutation awaits that
+ * invalidation before the card applies the response), so the decided proposal leaves that tab and its card
+ * unmounts before it can show the executed / rejected state. The final state is therefore checked on the
+ * "Approved" / "Rejected" tab, where the card is rendered from a fresh GET /actions. Returns the action id and
+ * the status the backend reported.
+ */
+export async function decideProposal(page: Page, card: Locator, decision: "approve" | "reject"): Promise<{ id: string; status: string }> {
+  const transcript = ((await card.getByTestId("proposal-transcript").textContent()) ?? "").trim();
+  const responded = page.waitForResponse(
+    (r) => r.request().method() === "POST" && new RegExp(`/api/v1/actions/[0-9a-f-]{36}/${decision}$`).test(r.url()),
+  );
+  await card.getByRole("button", { name: decision === "approve" ? /approve/i : /reject/i }).click();
+  const res = await responded;
+  expect(res.ok(), `POST /actions/{id}/${decision} -> ${res.status()}`).toBeTruthy();
+  const body = await res.json();
+  const id = body.data.action.id as string;
+  const status = body.data.action.status as string;
+  // The decided proposal is no longer pending, so it must leave the "Awaiting approval" list.
+  await expect(page.getByTestId("proposal-card").filter({ hasText: transcript })).toHaveCount(0);
+  await page.getByRole("tab", { name: decision === "approve" ? "Approved" : "Rejected" }).click();
+  const decided = page.getByTestId("proposal-card").filter({ hasText: transcript }).first();
+  if (decision === "reject") {
+    await expect(decided).toHaveAttribute("data-status", "rejected");
+    await expect(decided.getByTestId("proposal-rejected")).toContainText("No records were changed");
+  } else if (status === "executed") {
+    await expect(decided).toHaveAttribute("data-status", "executed");
+  }
+  return { id, status };
 }
