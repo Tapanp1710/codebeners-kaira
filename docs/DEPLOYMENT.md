@@ -6,7 +6,7 @@
   graceful shutdown (20 s), HEALTHCHECK on `/health`. The entrypoint validates configuration first and refuses
   to start with insecure production settings.
 * `docker-compose.prod.yml`: API only, with an external managed PostgreSQL from `.env.production`.
-* `.github/workflows/ci.yml`: quality gates (see TEST_STRATEGY.md).
+* `.github/workflows/ci.yml`: quality gates (see README.md, "Tests").
 * `.github/workflows/deploy.yml`: **manual** (`workflow_dispatch`, type `deploy`). It re-runs CI, then needs
   approval through the GitHub `production` environment, calls the host's deploy hook, and polls `/ready`.
 
@@ -40,5 +40,5 @@ provisioned or deployed.
 
 ## Scaling notes
 
-Stateless API: scale horizontally. Then move rate limiting to the gateway/proxy (the in-process limiter is
-per instance). The PostgreSQL pool size per worker is `DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW`.
+Stateless API: scale horizontally. Rate-limit counters live in PostgreSQL (`RATE_LIMIT_BACKEND=postgres`), so limits
+stay shared across workers and instances. The PostgreSQL pool size per worker is `DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW`.

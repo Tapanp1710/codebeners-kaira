@@ -70,4 +70,4 @@ In past-tense payment sentences, a bare weekday means the most recent one. "in N
 
 Deterministic tests use the rules extractor and an `httpx.MockTransport` Sarvam double (STT, LLM, TTS,
 403/429/timeout, invalid JSON, schema violations, hallucinated amounts, Telugu transcript). **No live
-Sarvam call has been made.** No credentials were available. See INTEGRATION_STATUS.md.
+Sarvam call has been made.** No credentials were available. Current status: README.md, "Verification status".

@@ -1,7 +1,7 @@
 """Central, validated application configuration.
 
 Every supported environment variable is declared here and documented in
-``.env.example`` and ``docs/ENVIRONMENT_SETUP.md``. Startup fails with a readable
+``.env.example`` and the README ("Environment variables"). Startup fails with a readable
 explanation when a setting required for security or core operation is missing.
 Optional voice/AI settings never prevent the API from starting.
 """
