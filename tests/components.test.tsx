@@ -1,5 +1,6 @@
 /**
- * Component tests for the voice orb, the payment status badge and the proposal (approval) card.
+ * Component tests for the payment status badge and the proposal (approval) card (the KAIRA orb is covered in
+ * tests/agent.test.tsx).
  * The proposal card is the safety gate between AI extraction and the books: these tests pin that
  * nothing is recorded until the owner approves and the backend confirms.
  */
@@ -10,7 +11,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ProposalCard } from "@/components/actions/proposal-card";
 import { PaymentStatusBadge } from "@/components/ui/finance";
-import { VoiceOrb, type OrbState } from "@/components/voice/voice-orb";
 
 import { demoProposal, envelope, errorEnvelope, staffSession } from "./fixtures";
 import { pathOf, renderApp } from "./render";
@@ -21,34 +21,6 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
 }));
-
-// The orb drives recording, so its state must be exposed to assistive tech (status text, aria-pressed, accessible name).
-describe("VoiceOrb", () => {
-  it.each<[OrbState, string]>([
-    ["idle", "Tap to speak"],
-    ["listening", "Listening… tap to stop"],
-    ["processing", "Working on it…"],
-    ["ready", "Ready"],
-    ["speaking", "Speaking…"],
-    ["error", "Something went wrong"],
-  ])("renders the %s state", (state, label) => {
-    render(<VoiceOrb state={state} onPress={() => {}} seconds={4} />);
-    const button = screen.getByTestId("voice-orb");
-    expect(button).toHaveAttribute("data-state", state);
-    expect(screen.getByRole("status")).toHaveTextContent(label);
-    expect(button).toHaveAccessibleName(state === "listening" ? "Stop recording" : "Start recording");
-    expect(button).toHaveAttribute("aria-pressed", String(state === "listening"));
-  });
-
-  // No auto-recording: the microphone is used only after an explicit press.
-  it("only records on an explicit press", async () => {
-    const onPress = vi.fn();
-    render(<VoiceOrb state="idle" onPress={onPress} />);
-    expect(onPress).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByTestId("voice-orb"));
-    expect(onPress).toHaveBeenCalledOnce();
-  });
-});
 
 // Partial payment and overdue state must both be visible at once.
 describe("PaymentStatusBadge", () => {

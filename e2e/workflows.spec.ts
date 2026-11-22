@@ -5,7 +5,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 
-import { apiGet, EMAIL, login, PASSWORD, uniqueName } from "./helpers";
+import { apiGet, askKaira, csrfToken, EMAIL, login, PASSWORD, settleLatestWrite, uniqueName } from "./helpers";
 
 type Customer = { id: string; outstanding: string; commitments: { status: string; amount: string }[] };
 
@@ -125,9 +125,10 @@ test.describe("customers, invoices and payments", () => {
   });
 });
 
-test.describe("assistant and approvals", () => {
-  // Both outcomes of the approval gate: rejection changes nothing; edit + approve writes payment, promise and audit entries.
-  test("typed request -> proposal -> edit -> approve updates the books; a second proposal is rejected", async ({ page }) => {
+test.describe("KAIRA agent and approvals", () => {
+  // The typed path of the voice agent: the request is executed (or proposed and approved) on the real books, and
+  // every ledger view refreshes. Which path is taken is the server's autonomy policy, so both are handled.
+  test("typed request to KAIRA records a payment and promise; the books and the UI refresh", async ({ page }) => {
     await login(page);
     const name = uniqueName();
     const { customerId, invoiceId } = await createCustomerWithInvoice(page, name);
@@ -137,23 +138,69 @@ test.describe("assistant and approvals", () => {
     await page.getByRole("dialog").getByRole("button", { name: "Record payment" }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Done" }).click();
 
+    // Demo phrase, typed to KAIRA on the agent home (reached through the primary navigation)
+    const reply = await askKaira(page, `${name} paid me 5,000 rupees today. He will clear the remaining amount next Monday.`);
+    expect(reply).toMatch(/5,000|5000/);
+    await expect(page.locator('[data-testid="activity-item"][data-kind="write"]').first()).toBeVisible();
+    const path = await settleLatestWrite(page, name);
+    test.info().annotations.push({ type: "agent-path", description: path });
+
+    // Verify the real backend state
+    const invoice = await apiGet<{ outstanding: string }>(page.request, `/invoices/${invoiceId}`);
+    expect(invoice.outstanding).toBe("7000.00");
+    const customer = await apiGet<Customer>(page.request, `/customers/${customerId}`);
+    expect(customer.commitments.find((c) => c.status === "pending")?.amount).toBe("7000.00");
+    const payments = await apiGet<{ items: { amount: string; source_action_id: string | null }[] }>(page.request, `/invoices/${invoiceId}/payments`);
+    const viaAgent = payments.items.find((p) => p.source_action_id);
+    expect(viaAgent).toMatchObject({ amount: "5000.00" });
+    const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${viaAgent!.source_action_id}`);
+    expect(audit.items.map((a) => a.action_type)).toEqual(expect.arrayContaining(["payment.recorded", "commitment.created"]));
+
+    // Manual screens show the new figures
+    await page.goto(`/customers/${customerId}`);
+    await expect(page.getByTestId("customer-stats")).toContainText("₹7,000.00");
+    await expect(page.getByTestId("customer-commitments")).toContainText("₹7,000.00");
+  });
+
+  // Staff requests and unconfirmed agent requests become proposals that the owner reviews on the Approvals page.
+  // The proposals are created through the extraction API here so the review flow is tested on its own:
+  // rejection changes nothing; edit + approve writes payment, promise and audit entries.
+  test("proposal review on Approvals: reject changes nothing; edit + approve updates the books", async ({ page }) => {
+    await login(page);
+    const name = uniqueName();
+    const { customerId, invoiceId } = await createCustomerWithInvoice(page, name);
+    await page.getByTestId("record-payment").click();
+    await page.getByRole("dialog").getByLabel("Amount (₹)").fill("6000");
+    await page.getByRole("dialog").getByRole("button", { name: "Record payment" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Done" }).click();
+
+    const token = await csrfToken(page.request);
+    const propose = async (transcript: string) => {
+      const res = await page.request.post("/api/backend/api/v1/assistant/extract", {
+        headers: { "X-CSRF-Token": token },
+        data: { transcript, language: null, input_mode: "text" },
+      });
+      expect(res.ok(), `POST /assistant/extract -> ${res.status()}`).toBeTruthy();
+      const body = await res.json();
+      expect(body.data.kind).toBe("proposal");
+    };
+
     // Rejection path: nothing changes
-    await page.getByTestId("assistant-launcher").click();
-    const panel = page.getByRole("dialog", { name: "KAIRA assistant" });
-    await panel.getByTestId("assistant-input").fill(`${name} paid me 1,000 rupees today.`);
-    await panel.getByTestId("assistant-submit").click();
-    const first = panel.getByTestId("proposal-card");
+    const small = `${name} paid me 1,000 rupees today.`;
+    await propose(small);
+    await page.goto("/actions");
+    const first = page.getByTestId("proposal-card").filter({ hasText: small });
     await expect(first).toBeVisible();
     await first.getByRole("button", { name: /reject/i }).click();
     await expect(first.getByTestId("proposal-rejected")).toBeVisible();
     expect((await apiGet<{ outstanding: string }>(page.request, `/invoices/${invoiceId}`)).outstanding).toBe("12000.00");
 
     // Demo phrase
-    await panel.getByTestId("assistant-input").fill(`${name} paid me 5,000 rupees today. He will clear the remaining amount next Monday.`);
-    await panel.getByTestId("assistant-submit").click();
-    const card = panel.getByTestId("proposal-card");
+    const demo = `${name} paid me 5,000 rupees today. He will clear the remaining amount next Monday.`;
+    await propose(demo);
+    await page.reload();
+    const card = page.getByTestId("proposal-card").filter({ hasText: demo });
     await expect(card).toHaveAttribute("data-status", "pending");
-    await expect(card).toBeVisible();
     const ops = card.getByTestId("proposal-operation");
     await expect(ops.nth(0)).toContainText("Record customer payment");
     await expect(ops.nth(0).getByTestId("resolution-customer")).toContainText(name);
@@ -179,58 +226,70 @@ test.describe("assistant and approvals", () => {
     const customer = await apiGet<Customer>(page.request, `/customers/${customerId}`);
     expect(customer.commitments.find((c) => c.status === "pending")?.amount).toBe("7000.00");
     const payments = await apiGet<{ items: { amount: string; source_action_id: string | null; payment_method: string }[] }>(page.request, `/invoices/${invoiceId}/payments`);
-    const viaAssistant = payments.items.find((p) => p.source_action_id);
-    expect(viaAssistant).toMatchObject({ amount: "5000.00", payment_method: "upi" });
-    const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${viaAssistant!.source_action_id}`);
+    const viaProposal = payments.items.find((p) => p.source_action_id);
+    expect(viaProposal).toMatchObject({ amount: "5000.00", payment_method: "upi" });
+    const audit = await apiGet<{ items: { action_type: string }[] }>(page.request, `/audit-logs?source_action_id=${viaProposal!.source_action_id}`);
     expect(audit.items.map((a) => a.action_type)).toEqual(expect.arrayContaining(["payment.recorded", "commitment.created", "action.approved"]));
 
-    // UI refreshed without reload
-    await page.keyboard.press("Escape");
     await page.goto(`/customers/${customerId}`);
     await expect(page.getByTestId("customer-stats")).toContainText("₹7,000.00");
     await expect(page.getByTestId("customer-commitments")).toContainText("₹7,000.00");
   });
 
-  // Fake media devices (playwright.config.ts) let recording run headless. The end state depends on whether the backend has a Sarvam key; typed input must stay usable either way.
-  test("voice: explicit recording, honest provider error, typed fallback still available", async ({ page }) => {
-    // The listening orb pulses forever, and Playwright only clicks an element once it stops moving, so the
-    // "stop" tap used to wait until the 30 s recording cap ended the animation and then START a new
-    // recording. With the user preference "reduce motion" (which the app honours in globals.css) the orb is
-    // still and the tap lands while recording. Audio comes from the deterministic fake microphone
-    // (playwright.config.ts); this proves the recording pipeline, not live Sarvam transcription.
+  // The live session is an explicit switch. Fake media devices (playwright.config.ts) grant a microphone; whether
+  // live voice then works depends on the backend's Sarvam key, so the expected state is read from /ready. In both
+  // cases nothing pretends to listen, and the typed path stays usable.
+  test("voice: explicit live session, honest status, typed fallback still available", async ({ page }) => {
+    // Reduced motion keeps the orb still, so Playwright's stability checks never wait on the animation.
     await page.emulateMedia({ reducedMotion: "reduce" });
     await login(page);
-    await page.getByTestId("assistant-launcher").click();
-    const panel = page.getByRole("dialog", { name: "KAIRA assistant" });
-    await expect(panel.getByTestId("orb-state")).toHaveText("idle");
-    await panel.getByTestId("voice-orb").click();
-    await expect(panel.getByTestId("orb-state")).toHaveText("listening");
-    // Record long enough to produce real audio; a near-instant second tap would end as empty_recording instead.
-    await page.waitForTimeout(1500);
-    await panel.getByTestId("voice-orb").click();
-    // Read the backend's own provider status so the expected end state matches this environment.
+    const toggle = page.getByTestId("agent-live-toggle");
+    await expect(page.getByTestId("agent-status-label")).toHaveText("Live session off");
+    await expect(page.getByRole("img", { name: "KAIRA: Live session off" })).toBeVisible();
+    await expect(page.getByTestId("status-mic")).toContainText("Off");
+    await expect(page.getByTestId("agent-mic-notice")).toContainText("The microphone is off");
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    await toggle.click();
     const ready = await page.request.get("/api/backend/api/v1/ready").then((r) => r.json());
     if (ready.data?.checks?.voice_provider === "configured") {
-      await expect(panel.getByTestId("orb-state")).toHaveText(/ready|error/);
+      await expect(toggle).toHaveAttribute("aria-pressed", "true", { timeout: 30_000 });
+      await expect(page.getByTestId("agent-mic-notice")).toContainText("Microphone is on");
+      await expect(page.getByTestId("status-mic")).toContainText("On");
+      await expect(page.getByRole("img", { name: /KAIRA: (Connecting…|Listening|Hearing you|Understanding|Speaking)/ })).toBeVisible({ timeout: 30_000 });
+      // Muting is a real state change; ending the session turns the microphone off again.
+      await page.getByTestId("agent-mute").click();
+      await expect(page.getByTestId("status-mic")).toContainText("Muted");
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await expect(page.getByTestId("agent-status-label")).toHaveText("Live session off");
     } else {
-      await expect(panel.getByTestId("orb-state")).toHaveText("error");
-      await expect(panel.getByText(/SARVAM_API_KEY/)).toBeVisible();
-      await expect(panel.getByText("Voice is not available on this server yet")).toBeVisible();
+      await expect(page.getByTestId("agent-error")).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole("img", { name: "KAIRA: Voice unavailable" })).toBeVisible();
+      await expect(page.getByTestId("status-mic")).not.toContainText("On");
     }
-    await expect(panel.getByTestId("assistant-input")).toBeEditable();
+    await expect(page.getByTestId("agent-text-input")).toBeEditable();
   });
 
-  // Answers and reminder drafts must use the backend's figures (the 18,000.00 invoice); the draft says KAIRA never sends it.
-  test("question is answered from backend data and a reminder draft uses real figures", async ({ page }) => {
+  // The dock talks to the same session from any page: a question asked on a customer page is answered from the
+  // backend's figures (the 18,000.00 invoice), and the tool run is listed on the agent home afterwards.
+  test("question asked from the dock is answered from backend data; a reminder draft uses real figures", async ({ page }) => {
     await login(page);
     const name = uniqueName();
     const { customerId } = await createCustomerWithInvoice(page, name);
-    await page.getByTestId("assistant-launcher").click();
-    const panel = page.getByRole("dialog", { name: "KAIRA assistant" });
-    await panel.getByTestId("assistant-input").fill(`How much does ${name} owe?`);
-    await panel.getByTestId("assistant-submit").click();
-    await expect(panel.getByTestId("assistant-answer")).toContainText("₹18,000.00");
-    await page.keyboard.press("Escape");
+    await page.goto(`/customers/${customerId}`);
+    await expect(page.getByTestId("agent-dock")).toBeVisible();
+    // Exactly one agent interface: the legacy launcher is gone.
+    await expect(page.getByTestId("assistant-launcher")).toHaveCount(0);
+    const answer = await askKaira(page, `How much does ${name} owe?`, "dock");
+    expect(answer).toMatch(/18,000/);
+
+    // Client-side navigation keeps the session: the dock's turn is on the agent home.
+    await page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "KAIRA", exact: true }).click();
+    await page.waitForURL((u) => u.pathname === "/agent");
+    await expect(page.locator('[data-testid="activity-item"][data-kind="read"][data-state="completed"]').first()).toBeVisible();
+    await expect(page.getByTestId("transcript-entry").filter({ hasText: `How much does ${name} owe?` })).toHaveCount(1);
+    await expect(page.getByTestId("agent-dock")).toHaveCount(0);
 
     await page.goto(`/customers/${customerId}`);
     await page.getByRole("button", { name: "Draft reminder" }).click();
@@ -271,9 +330,16 @@ test.describe("forecast and what-if", () => {
   test("mobile layout: navigation drawer and readable tables", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page);
+    // The agent home fits a phone without horizontal scrolling.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)).toBe(false);
     await page.getByRole("button", { name: "Open navigation" }).click();
     await page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name: "Receivables" }).click();
     await expect(page.locator("main h1")).toHaveText("Receivables");
+    // On a phone the dock is collapsed to state + live switch; "Show more" reveals the typed input.
+    await expect(page.getByTestId("agent-dock")).toBeVisible();
+    await expect(page.getByTestId("dock-text-input")).toBeHidden();
+    await page.getByRole("button", { name: "Show more" }).click();
+    await expect(page.getByTestId("dock-text-input")).toBeVisible();
     // 1px tolerance absorbs sub-pixel rounding of scrollWidth.
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     expect(overflow).toBe(false);

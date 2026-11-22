@@ -4,13 +4,16 @@
  * Authenticated application chrome, rendered by `app/(app)/layout.tsx` inside `<Providers>`.
  *
  * Provides the desktop sidebar and mobile navigation drawer, the sticky header (pending-approval
- * badge, alerts menu, user menu with sign-out), the floating "Ask KAIRA" orb that opens the voice
- * assistant sheet, and a skip link to `#main`. It reads the session from context and queries
- * GET /actions (pending count) and GET /insights (alerts); both refresh through the normal
- * React Query staleness rules and `invalidateFinancial` / action invalidations elsewhere.
+ * badge, alerts menu, user menu with sign-out), the persistent KAIRA agent dock (every page except the
+ * agent home, which is the full-size version of the same session), and a skip link to `#main`. It reads the
+ * session from context and queries GET /actions (pending count) and GET /insights (alerts); both refresh
+ * through the normal React Query staleness rules and `invalidateFinancial` / action invalidations elsewhere.
+ * The live voice session itself lives in <AgentProvider> (app/(app)/layout.tsx), above this shell, so it
+ * survives navigation between pages.
  */
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  AudioLines,
   Bell,
   ClipboardCheck,
   FlaskConical,
@@ -21,32 +24,36 @@ import {
   Settings,
   Users,
   Wallet,
-  X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { useSession } from "@/components/providers";
 import { Badge, cn } from "@/components/ui/primitives";
-import { AssistantPanel } from "@/components/voice/assistant-panel";
-import { VoiceOrb } from "@/components/voice/voice-orb";
+import { AgentDock } from "@/components/agent/agent-dock";
 import { logout } from "@/lib/api/client";
 import { clearLocalAttemptsForLogout } from "@/lib/payments/server-attempts";
 import { useActions, useInsights } from "@/lib/api/hooks";
 
 /**
- * Primary navigation entries. `also` lists extra path prefixes that highlight the same entry
- * (invoice pages live under "Customers & Invoices"). Approvals and Settings are linked separately.
- * Exported for tests.
+ * Primary navigation, in order: the KAIRA agent home first, then the manual modules. `also` lists extra path
+ * prefixes that highlight the same entry (invoice pages live under "Customers & Invoices"). The Approvals entry
+ * carries the pending-proposal count. Exported for tests.
  */
 export const NAV = [
+  { href: "/agent", label: "KAIRA", icon: AudioLines },
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/customers", label: "Customers & Invoices", icon: Users, also: ["/invoices"] },
   { href: "/receivables", label: "Receivables", icon: Wallet },
   { href: "/cashflow", label: "Cash-Flow Forecast", icon: LineChart },
   { href: "/scenarios", label: "What-If Analysis", icon: FlaskConical },
+  { href: "/actions", label: "Approvals", icon: ClipboardCheck },
+  { href: "/settings", label: "Settings", icon: Settings },
 ] as const;
+
+/** The agent home, where the full agent UI replaces the dock. */
+export const AGENT_HOME = "/agent";
 
 /** Exact match or a sub-path ("/customers/123"), but not a sibling sharing a prefix ("/customersX"). */
 function isActive(pathname: string, item: (typeof NAV)[number]) {
@@ -54,8 +61,11 @@ function isActive(pathname: string, item: (typeof NAV)[number]) {
   return prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
-/** Shared by the sidebar and the mobile drawer; `onNavigate` lets the drawer close itself. Marks the active link with aria-current="page". */
-function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
+/**
+ * Shared by the sidebar and the mobile drawer; `onNavigate` lets the drawer close itself. Marks the active link
+ * with aria-current="page". `pendingCount` is shown on Approvals.
+ */
+function NavLinks({ onNavigate, pendingCount }: { onNavigate?: () => void; pendingCount: number }) {
   const pathname = usePathname();
   return (
     <ul className="space-y-1">
@@ -74,59 +84,17 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
               )}
             >
               <Icon className="size-5 shrink-0" aria-hidden="true" />
-              {item.label}
+              <span className="flex-1">{item.label}</span>
+              {item.href === "/actions" && pendingCount > 0 && (
+                <span className="rounded-full bg-champagne px-2 text-xs font-bold text-navy" aria-label={`${pendingCount} awaiting approval`}>
+                  {pendingCount}
+                </span>
+              )}
             </Link>
           </li>
         );
       })}
     </ul>
-  );
-}
-
-/**
- * Right-hand modal sheet hosting the AssistantPanel, built on the native <dialog> (focus trap and
- * inert background come from showModal). The panel is only rendered while open, so closing the
- * sheet unmounts it: its recorder releases the microphone and any playing answer is paused by the
- * panel's own cleanup, and the next opening starts from a blank state.
- */
-function AssistantSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  // Syncs the `open` prop to the imperative dialog API. Unlike ui/Dialog there is no attribute fallback
-  // when showModal is unavailable (the optional call just does nothing).
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (open && !el.open) el.showModal?.();
-    if (!open && el.open) el.close?.();
-  }, [open]);
-  // Esc fires `cancel`; it is prevented so React state (not the browser) decides when the dialog closes.
-  return (
-    <dialog
-      ref={ref}
-      onCancel={(e) => {
-        e.preventDefault();
-        onClose();
-      }}
-      aria-label="KAIRA assistant"
-      className="m-0 ml-auto h-dvh max-h-dvh w-full max-w-2xl bg-cream p-0 text-ink shadow-2xl"
-    >
-      {open && (
-        <div className="flex h-full flex-col">
-          <div className="flex items-center justify-between border-b border-line px-6 py-4">
-            <div>
-              <h2 className="font-display text-xl font-semibold">Ask KAIRA</h2>
-              <p className="text-xs text-muted">Speak or type. You review everything before it is recorded.</p>
-            </div>
-            <button type="button" onClick={onClose} aria-label="Close assistant" className="rounded-full p-2 text-muted hover:bg-navy/5 hover:text-ink">
-              <X className="size-5" aria-hidden="true" />
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto px-6 py-6">
-            <AssistantPanel />
-          </div>
-        </div>
-      )}
-    </dialog>
   );
 }
 
@@ -253,41 +221,38 @@ function UserMenu() {
   );
 }
 
-/** Page frame for every route under app/(app). `children` is the routed page, rendered inside <main id="main">. */
+/**
+ * Page frame for every route under app/(app). `children` is the routed page, rendered inside <main id="main">.
+ * The agent dock is rendered on every page except the agent home; <main> then gets extra bottom padding so
+ * the fixed dock never covers the end of a page.
+ */
 export function AppShell({ children }: { children: ReactNode }) {
   const { session } = useSession();
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const pathname = usePathname();
   const [mobileNav, setMobileNav] = useState(false);
   // Fetches a single row only to read `total`: the number of proposals awaiting approval.
   // Its key starts with "actions", so extract/approve/reject invalidations refresh this badge too.
   const pending = useActions({ status: "pending", page_size: 1 });
   const pendingCount = pending.data?.total ?? 0;
+  const showDock = !(pathname === AGENT_HOME || pathname.startsWith(`${AGENT_HOME}/`));
 
   // The mobile drawer is rendered only while open (role="dialog", aria-modal) and closes on backdrop
   // click or navigation; it is not a native <dialog>, so it has no built-in focus trap or Esc handling.
-  // The launcher orb is the small, idle-only VoiceOrb used as a plain button: it opens the
-  // assistant sheet and never records by itself.
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[17rem_1fr]">
       <a href="#main" className="sr-only z-50 rounded bg-paper px-3 py-2 focus:not-sr-only focus:fixed focus:top-2 focus:left-2">
         Skip to content
       </a>
       {/* Sidebar (desktop) */}
-      <aside className="sticky top-0 hidden h-dvh flex-col bg-navy px-4 py-6 lg:flex">
-        <Link href="/dashboard" className="mb-8 flex items-center gap-3 px-2">
+      <aside className="sticky top-0 hidden h-dvh flex-col overflow-y-auto bg-navy px-4 py-6 lg:flex">
+        <Link href={AGENT_HOME} className="mb-8 flex items-center gap-3 px-2">
           <span className="orb block size-8" data-state="idle" aria-hidden="true" />
           <span className="font-display text-xl font-semibold tracking-wide text-cream">KAIRA</span>
         </Link>
         <nav aria-label="Primary">
-          <NavLinks />
+          <NavLinks pendingCount={pendingCount} />
         </nav>
-        <div className="mt-auto space-y-3">
-          <Link href="/actions" className="flex items-center justify-between rounded-xl px-3 py-2.5 text-sm font-semibold text-cream/75 hover:bg-white/5 hover:text-cream">
-            <span className="flex items-center gap-3">
-              <ClipboardCheck className="size-5" aria-hidden="true" /> Approvals
-            </span>
-            {pendingCount > 0 && <span className="rounded-full bg-champagne px-2 text-xs font-bold text-navy">{pendingCount}</span>}
-          </Link>
+        <div className="mt-auto pt-6">
           <div className="rounded-2xl bg-abyss px-3 py-3 text-xs text-cream/70">
             <p className="font-semibold text-cream">{session?.business.name}</p>
             <p>{session?.business.currency} · {session?.business.timezone}</p>
@@ -299,11 +264,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       {mobileNav && (
         <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation">
           <button type="button" className="absolute inset-0 bg-navy/50" aria-label="Close navigation" onClick={() => setMobileNav(false)} />
-          <nav aria-label="Primary" className="absolute inset-y-0 left-0 w-72 bg-navy px-4 py-6">
-            <NavLinks onNavigate={() => setMobileNav(false)} />
-            <Link href="/actions" onClick={() => setMobileNav(false)} className="mt-4 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-cream/75">
-              <ClipboardCheck className="size-5" aria-hidden="true" /> Approvals {pendingCount > 0 && `(${pendingCount})`}
-            </Link>
+          <nav aria-label="Primary" className="absolute inset-y-0 left-0 w-72 overflow-y-auto bg-navy px-4 py-6">
+            <NavLinks pendingCount={pendingCount} onNavigate={() => setMobileNav(false)} />
           </nav>
         </div>
       )}
@@ -324,15 +286,13 @@ export function AppShell({ children }: { children: ReactNode }) {
             <UserMenu />
           </div>
         </header>
-        <main id="main" className="mx-auto max-w-7xl px-4 py-8 sm:px-8">{children}</main>
+        <main id="main" className={cn("mx-auto max-w-7xl px-4 py-8 sm:px-8", showDock && "pb-36 sm:pb-40")}>
+          {children}
+        </main>
       </div>
 
-      {/* Assistant entry point */}
-      <div className="fixed right-5 bottom-5 z-30 flex items-center gap-3">
-        <span className="hidden rounded-full bg-navy px-3 py-1.5 text-xs font-semibold text-cream shadow-lg sm:block">Ask KAIRA</span>
-        <VoiceOrb state="idle" size="sm" onPress={() => setAssistantOpen(true)} ariaLabel="Open the KAIRA assistant" testId="assistant-launcher" />
-      </div>
-      <AssistantSheet open={assistantOpen} onClose={() => setAssistantOpen(false)} />
+      {/* One agent interface per page: the dock everywhere except the agent home (same live session). */}
+      {showDock && <AgentDock />}
     </div>
   );
 }
