@@ -1,0 +1,8 @@
+api_version=1.2.0
+backend_branch=feat/live-autonomous-voice-agent
+backend_commit=5f5d80c5ca309fa7355148d512e996d3466ffe86
+openapi_sha256=79f09cf7f89482166584ec27ac17731100334f1380400da1e7f37d05c2b51856
+paths=47
+schemas=125
+imported_on=2026-11-22
+types_generator=openapi-typescript@7.13.0

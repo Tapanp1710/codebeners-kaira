@@ -1,0 +1,58 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+build/
+next-env.d.ts
+*.tsbuildinfo
+
+# env (never commit real configuration)
+.env
+.env.local
+.env.*.local
+.env.production
+
+# tests
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+e2e/.auth/
+
+# misc
+*.log
+.DS_Store
+.run/
+.vscode/
+.codebenders/
+
+# --- defensive patterns added before publication (2026-11-22) ---
+# local environments and secrets (templates such as .env.example stay tracked)
+venv/
+.venv/
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+# local databases, dumps and backups
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+backups/
+# build, coverage, logs and test output
+dist/
+build/
+coverage/
+htmlcov/
+.coverage
+*.log
+logs/
+test-results/
+playwright-report/
+node_modules/
+.next/
