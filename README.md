@@ -59,18 +59,21 @@ microphone permission; listening in the background with the browser closed would
 * Backend: `cd backend && python -m pytest -q` (PostgreSQL), `ruff check .`, migrations and OpenAPI drift
   (`scripts/verify`). Frontend: `cd kaira-frontend && npm run lint && npm run typecheck && npm test && npm run build`,
   Playwright end-to-end against a disposable backend.
-* CI: `.github/workflows/backend.yml` and `frontend.yml` run every check for the folder that changed;
-  `backend-deploy.yml` is manual-only and nothing is deployed.
+* CI: `.github/workflows/backend.yml` and `frontend.yml` run every check for the folder that changed (always on
+  `main`); `e2e.yml` runs Playwright against a seeded backend started inside the job, with no secrets;
+  `full-suite.yml` runs all three on demand; `backend-deploy.yml` is manual-only.
+* Deployment target (free tier): backend on a Render Docker web service with Supabase PostgreSQL (session pooler),
+  frontend on Vercel. See [`backend/docs/DEPLOYMENT.md`](backend/docs/DEPLOYMENT.md).
 
 ## Verified on 22 Nov 2026
 
 | Check | Result |
 |---|---|
-| Backend tests | 220 passed (196 existing + 24 agent safety unit tests); ruff clean; migration round trip clean |
+| Backend tests | 220 passed on 22 Nov (196 existing + 24 agent safety unit tests); ruff clean; migration round trip clean. The suite has since grown to 507 collected tests at `a05050b` (including the extended agent acceptance suite); current results are reported by `backend-ci` |
 | Frontend | lint 0 warnings, typecheck, 228 unit/component tests, production build |
 | Live sarvam-105b agent (typed turns, disposable DB) | balance question; "Ramesh paid me." -> clarification, nothing written; follow-up "He paid…" -> one payment; invoice creation (INV-0006); correction 5,000 -> 6,000 records only ₹1,000 after a later-turn "yes"; ambient chatter ignored; "mark INV-0001 paid" refused; monthly collections; Telugu and Hindi payment + promise (balance ₹7,000, promise for the remainder) |
 | Live WebSocket pipeline (Sarvam STT -> agent -> Sarvam TTS) | English question, Telugu payment statement and barge-in; first partial 36-76 ms after speech start; reply text 1.9-3.7 s and first audio 2.2-4.2 s after the end of speech; tts.stop ~20 ms after speech start; billed STT seconds recorded. Input was Sarvam-synthesized speech streamed in real time (a pipeline loopback), not a human microphone |
-| Not yet verified | a human speaking into a browser microphone; Playwright e2e of the new agent UI against a live backend; the extended agent acceptance suite (branch `test/voice-agent-acceptance`, being updated to the hardened policy) |
+| Not yet verified | a human speaking into a browser microphone; Playwright e2e of the agent UI against a backend with a live Sarvam key (CI runs e2e without a key, and the specs that need the LLM skip themselves) |
 
 ## Repository history
 
