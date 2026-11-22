@@ -7,6 +7,17 @@ def make(**kw) -> Settings:
     return Settings(_env_file=None, **kw)
 
 
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests describe defaults and validation, so they must not see the runner's environment.
+
+    CI sets APP_ENV, DATABASE_URL and JWT_SECRET_KEY at job level, which made the default and production
+    tests fail there while passing locally. Every variable Settings reads is removed; tests that need one
+    set it themselves (see test_env_overrides)."""
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_defaults() -> None:
     s = make()
     assert s.APP_NAME == "KAIRA"
