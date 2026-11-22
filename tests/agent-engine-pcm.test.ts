@@ -139,9 +139,12 @@ describe("StreamingResampler", () => {
 // ------------------------------------------------------------------ the worklet file itself
 type Posted = { type: string; pcm: ArrayBuffer; rms: number };
 
-function loadWorklet(rate: number) {
+type FakeProcessor = { process: (inputs: Float32Array[][]) => boolean; port: { posted: Posted[] } };
+type ProcessorClass = new (options: unknown) => FakeProcessor;
+
+function loadWorklet(rate: number): FakeProcessor {
   const src = readFileSync(fileURLToPath(new URL("../public/worklets/kaira-mic-worklet.js", import.meta.url)), "utf8");
-  let Processor: (new (options: unknown) => { process: (inputs: Float32Array[][]) => boolean; port: { posted: Posted[] } }) | null = null;
+  const registry: { cls: ProcessorClass | null } = { cls: null };
   class FakeAudioWorkletProcessor {
     port = {
       posted: [] as Posted[],
@@ -151,12 +154,12 @@ function loadWorklet(rate: number) {
       },
     };
   }
-  const register = (_name: string, cls: typeof Processor) => {
-    Processor = cls;
+  const register = (_name: string, cls: ProcessorClass) => {
+    registry.cls = cls;
   };
   new Function("registerProcessor", "AudioWorkletProcessor", "sampleRate", src)(register, FakeAudioWorkletProcessor, rate);
-  if (!Processor) throw new Error("worklet did not register a processor");
-  return new (Processor as NonNullable<typeof Processor>)({ processorOptions: { targetRate: 16000, frameSamples: 1600 } });
+  if (!registry.cls) throw new Error("worklet did not register a processor");
+  return new registry.cls({ processorOptions: { targetRate: 16000, frameSamples: 1600 } });
 }
 
 describe("kaira-mic-worklet.js", () => {
